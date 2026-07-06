@@ -26,7 +26,15 @@ class BoulderTrainer(DefaultTrainer):
         return COCOEvaluator(dataset_name, cfg, False, output_folder)
 
 
-def register_datasets(base_path: Path) -> None:
+def dataset_class_names(base_path: Path) -> list[str]:
+    """Read category names from the train COCO JSON (sorted by category id)."""
+    data = json.loads((base_path / "train_annotations.json").read_text())
+    cats = sorted(data["categories"], key=lambda c: c["id"])
+    return [c["name"] for c in cats]
+
+
+def register_datasets(base_path: Path) -> list[str]:
+    class_names = dataset_class_names(base_path)
     for name, image_dir, ann_file in [
         ("boulder_train", "train", "train_annotations.json"),
         ("boulder_valid", "valid", "validation_annotations.json"),
@@ -38,7 +46,8 @@ def register_datasets(base_path: Path) -> None:
             str(base_path / ann_file),
             str(base_path / image_dir),
         )
-        MetadataCatalog.get(name).thing_classes = ["Boulder"]
+        MetadataCatalog.get(name).thing_classes = class_names
+    return class_names
 
 
 def build_cfg(
@@ -48,6 +57,7 @@ def build_cfg(
     batch_size: int,
     num_workers: int,
     device: str = "cpu",
+    num_classes: int = 1,
 ) -> detectron2.config.CfgNode:
     cfg = get_cfg()
     cfg.merge_from_file(
@@ -66,7 +76,7 @@ def build_cfg(
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
         "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
     )
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.DEVICE = device
 
@@ -132,7 +142,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    register_datasets(args.dataset_dir)
+    class_names = register_datasets(args.dataset_dir)
     cfg = build_cfg(
         args.dataset_dir,
         args.output_dir,
@@ -140,8 +150,10 @@ def main() -> None:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         device=args.device,
+        num_classes=len(class_names),
     )
 
+    print("Classes:", class_names)
     print("Dataset summary:", json.dumps(summarize_dataset(args.dataset_dir), indent=2))
     print("Train images registered:", len(DatasetCatalog.get("boulder_train")))
     print("Output dir:", cfg.OUTPUT_DIR)

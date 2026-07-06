@@ -12,6 +12,7 @@ Copy this folder structure (paths relative to project root, e.g. `D:\boulder_pro
 boulder_project/
 ├── BoulderCalculator/
 │   └── scripts/
+│       ├── gpkg_to_coco.py
 │       ├── geojson_tiles_to_coco.py
 │       ├── visualize_coco_annotations.py
 │       ├── run_tile_inference.py
@@ -102,7 +103,43 @@ pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu124
 
 Activate the venv first (`call .venv_boulder\Scripts\activate.bat` on Windows).
 
-### Step 1 — Build COCO dataset from GeoJSON + tiles
+### Step 1 (v2, current) — Build two-class COCO dataset from GPKG + tiles
+
+The current annotation source is a single QGIS GeoPackage with a `Class`
+attribute (`0` = Boulder, `1` = BoulderDeposit) plus an ROI polygon layer
+(`roi.shp`) that masks out areas landward of the rock wall. Tile extents are
+computed from the GeoTIFFs directly — no `tile_extents` GPKG files are needed.
+
+```bat
+python BoulderCalculator\scripts\gpkg_to_coco.py ^
+  --segmentation-dir segmentation ^
+  --gpkg "segmentation\annotations\july5_deposits&more.gpkg" ^
+  --roi segmentation\tile_extents\roi.shp ^
+  --output-dir segmentation\coco_dataset_v2
+```
+
+Notes:
+
+- Requires `fiona` (in `requirements-training.txt`).
+- Annotations are reprojected from EPSG:4326 to EPSG:25829, clipped to the ROI
+  union and each tile's extent, then converted to pixel coordinates.
+- Categories: `1 = Boulder`, `2 = BoulderDeposit`.
+- `--min-area-m2 1.5` optionally drops small features (default: no size filter).
+- `--write-extents` also writes `tile_extents/tile_extents_auto.geojson`
+  (all tile footprints in EPSG:25829, for QGIS reference).
+- Splits (25 tiles: rows 08_22-27, 07_24-29, 06_27-30, 05_31-35, 04_34-37):
+  - **Train (20):** everything not in valid/test
+  - **Valid (2):** 05_33, 08_24
+  - **Test (3):** 04_35, 05_34, 06_29
+  - Override with `--train-tiles/--valid-tiles/--test-tiles` (comma-separated
+    keys like `08_22`).
+
+`train_boulder_local.py` reads class names from the dataset JSON automatically,
+so the same command works for 1-class and 2-class datasets. For inference
+scripts pass `--class-names "Boulder,BoulderDeposit"` for models trained on the
+v2 dataset.
+
+### Step 1 (legacy) — Build COCO dataset from GeoJSON + tiles
 
 ```bat
 python BoulderCalculator\scripts\geojson_tiles_to_coco.py ^
@@ -235,7 +272,29 @@ The `_1st` / `_2nd` suffix on GeoJSON files is only a version label; the script 
 
 ---
 
-## Quick copy-paste checklist (GPU Windows)
+## Quick copy-paste checklist (GPU Windows, v2 two-class dataset)
+
+Files needed on the Windows machine (which already has `segmentation/tiling/`
+and the BoulderCalculator repo):
+
+- `segmentation/annotations/july5_deposits&more.gpkg`
+- `segmentation/tile_extents/roi.shp` + sidecars (`roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg`)
+- Updated repo code (`git pull`): `gpkg_to_coco.py`, updated `train_boulder_local.py`,
+  `run_tile_inference.py`, `run_boulder_detection.py`, `requirements-training.txt`
+- `pip install fiona` into the existing venv (or re-run the requirements install)
+
+```bat
+cd D:\boulder_project
+call .venv_boulder\Scripts\activate.bat
+pip install fiona
+
+python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --gpkg "segmentation\annotations\july5_deposits&more.gpkg" --roi segmentation\tile_extents\roi.shp --output-dir segmentation\coco_dataset_v2
+python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_v2 --output-dir segmentation\visualizations\coco_gt_v2
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_v2 --output-dir segmentation\training_run_v2 --max-iter 4000 --batch-size 2 --num-workers 4 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_v2\test\25IniSouthOrt_06_29.tif --model segmentation\training_run_v2\model_final.pth --gt-json segmentation\coco_dataset_v2\testing_annotations.json --output-dir segmentation\visualizations\test_inference_v2 --score-thresh 0.4 --device cuda --class-names "Boulder,BoulderDeposit"
+```
+
+## Quick copy-paste checklist (GPU Windows, legacy 1-class)
 
 ```bat
 cd D:\boulder_project
@@ -253,7 +312,8 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 | Script | Purpose |
 |--------|---------|
-| `geojson_tiles_to_coco.py` | GeoJSON + tiles → COCO train/valid/test |
+| `gpkg_to_coco.py` | **(v2)** GPKG (Class attr) + ROI + tiles → two-class COCO train/valid/test |
+| `geojson_tiles_to_coco.py` | (legacy) GeoJSON + tiles → 1-class COCO train/valid/test |
 | `visualize_coco_annotations.py` | Ground-truth polygon QA images |
 | `train_boulder_local.py` | Fine-tune Mask R-CNN |
 | `run_tile_inference.py` | Single-tile inference + GT comparison |

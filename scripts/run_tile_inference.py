@@ -49,7 +49,14 @@ def main() -> None:
     parser.add_argument("--score-thresh", type=float, default=0.5)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--gt-json", type=Path, default=None)
+    parser.add_argument(
+        "--class-names",
+        type=str,
+        default="Boulder",
+        help="Comma-separated class names matching the trained model (e.g. 'Boulder,BoulderDeposit').",
+    )
     args = parser.parse_args()
+    class_names = [c.strip() for c in args.class_names.split(",") if c.strip()]
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rgb = load_rgb(args.image)
@@ -60,7 +67,7 @@ def main() -> None:
         model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     )
     cfg.MODEL.WEIGHTS = str(args.model)
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = len(class_names)
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
     cfg.MODEL.DEVICE = args.device
     cfg.INPUT.MAX_SIZE_TEST = 2000
@@ -73,7 +80,7 @@ def main() -> None:
 
     visualizer = Visualizer(
         rgb,
-        metadata={"thing_classes": ["Boulder"]},
+        metadata={"thing_classes": class_names},
         scale=1.0,
         instance_mode=ColorMode.IMAGE_BW,
     )

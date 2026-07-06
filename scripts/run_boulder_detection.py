@@ -47,7 +47,9 @@ def make_starts(length: int, window: int, step: int) -> list[int]:
     return starts
 
 
-def coco_initialize(class_name: str = "Boulder") -> dict:
+def coco_initialize(class_names: list[str] | None = None) -> dict:
+    if not class_names:
+        class_names = ["Boulder"]
     return {
         "licenses": [{"name": "", "id": 0, "url": ""}],
         "info": {
@@ -58,7 +60,10 @@ def coco_initialize(class_name: str = "Boulder") -> dict:
             "version": "",
             "year": "",
         },
-        "categories": [{"id": 1, "name": class_name, "supercategory": "none"}],
+        "categories": [
+            {"id": i + 1, "name": name, "supercategory": "none"}
+            for i, name in enumerate(class_names)
+        ],
         "images": [],
         "annotations": [],
     }
@@ -175,7 +180,10 @@ def run_detection(
     step_rate: float = 0.25,
     epsg: int = 25829,
     max_tiles: int | None = None,
+    class_names: list[str] | None = None,
 ) -> dict:
+    if not class_names:
+        class_names = ["Boulder"]
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = get_cfg()
@@ -183,7 +191,7 @@ def run_detection(
         model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     )
     cfg.MODEL.WEIGHTS = str(model_path)
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+    cfg.MODEL.ROI_HEADS.NUM_CLASSES = len(class_names)
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = score_thresh
     cfg.INPUT.MAX_SIZE_TEST = 0
     cfg.INPUT.MIN_SIZE_TEST = 0
@@ -222,7 +230,7 @@ def run_detection(
                 [r0, r0 + pix_window[0], c0, c0 + pix_window[1]]
             )
 
-    coco = coco_initialize()
+    coco = coco_initialize(class_names)
     coco["images"].append(
         {
             "id": 1,
@@ -322,6 +330,12 @@ def main() -> None:
     parser.add_argument("--step-rate", type=float, default=0.25)
     parser.add_argument("--epsg", type=int, default=25829)
     parser.add_argument("--max-tiles", type=int, default=None)
+    parser.add_argument(
+        "--class-names",
+        type=str,
+        default="Boulder",
+        help="Comma-separated class names matching the trained model (e.g. 'Boulder,BoulderDeposit').",
+    )
     args = parser.parse_args()
 
     summary = run_detection(
@@ -333,6 +347,7 @@ def main() -> None:
         step_rate=args.step_rate,
         epsg=args.epsg,
         max_tiles=args.max_tiles,
+        class_names=[c.strip() for c in args.class_names.split(",") if c.strip()],
     )
     print(json.dumps(summary, indent=2))
 
