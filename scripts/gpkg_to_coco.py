@@ -37,13 +37,18 @@ CATEGORIES = [
 ]
 
 # Tile keys (row_col of 25IniSouthOrt_ROW_COL.tif).
-# Rows 8: 22-27, 7: 24-29, 6: 27-30, 5: 31-35, 4: 34-37.
+# Rows 11: 17-18, 10: 17-21, 9: 18-25, 8: 20-27, 7: 24-29, 6: 27-31,
+#      5: 30-35, 4: 33-38, 3: 36-38.
 ALL_TILES = (
-    [f"08_{c}" for c in range(22, 28)]
+    [f"11_{c}" for c in range(17, 19)]
+    + [f"10_{c}" for c in range(17, 22)]
+    + [f"09_{c}" for c in range(18, 26)]
+    + [f"08_{c}" for c in range(20, 28)]
     + [f"07_{c}" for c in range(24, 30)]
-    + [f"06_{c}" for c in range(27, 31)]
-    + [f"05_{c}" for c in range(31, 36)]
-    + [f"04_{c}" for c in range(34, 38)]
+    + [f"06_{c}" for c in range(27, 32)]
+    + [f"05_{c}" for c in range(30, 36)]
+    + [f"04_{c}" for c in range(33, 39)]
+    + [f"03_{c}" for c in range(36, 39)]
 )
 VALID_TILES = ["05_33", "08_24"]
 TEST_TILES = ["04_35", "05_34", "06_29"]
@@ -314,7 +319,7 @@ def main() -> None:
         "--gpkg",
         type=Path,
         default=None,
-        help="Annotation GPKG (default: segmentation-dir/annotations/july5_deposits&more.gpkg)",
+        help="Annotation GPKG (default: segmentation-dir/annotations/july7_training_input.gpkg)",
     )
     parser.add_argument("--layer", type=str, default=None, help="GPKG layer name (default: first layer)")
     parser.add_argument("--class-field", type=str, default="Class")
@@ -338,7 +343,7 @@ def main() -> None:
     args = parser.parse_args()
 
     seg_dir = args.segmentation_dir
-    gpkg = args.gpkg or (seg_dir / "annotations" / "july5_deposits&more.gpkg")
+    gpkg = args.gpkg or (seg_dir / "annotations" / "july7_training_input.gpkg")
     tile_dir = args.tile_dir or (seg_dir / "tiling")
     output_dir = args.output_dir or (seg_dir / "coco_dataset_v2")
 
