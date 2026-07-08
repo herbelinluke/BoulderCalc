@@ -184,7 +184,10 @@ def convert_tile(
             clipped = clipped.intersection(roi)
             if clipped.is_empty:
                 continue
-        if min_area_m2 > 0 and clipped.area < min_area_m2:
+        # Size filter applies to Boulders only (class 0); deposits are kept
+        # regardless so rubble-field context is never dropped. Area is the
+        # full ROI-clipped geometry, so cross-tile boulders are judged whole.
+        if min_area_m2 > 0 and cls == 0 and clipped.area < min_area_m2:
             continue
         clipped = clipped.intersection(tile_poly)
         for poly in polygons_of(clipped):
@@ -331,7 +334,12 @@ def main() -> None:
     )
     parser.add_argument("--tile-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
-    parser.add_argument("--min-area-m2", type=float, default=0.0, help="Drop features smaller than this (0 = no filter)")
+    parser.add_argument(
+        "--min-area-m2",
+        type=float,
+        default=0.0,
+        help="Drop Boulder polygons (class 0) smaller than this in m2, judged on the whole ROI-clipped geometry. Deposits are never filtered. 0 = no filter.",
+    )
     parser.add_argument("--train-tiles", type=str, default=None)
     parser.add_argument("--valid-tiles", type=str, default=None)
     parser.add_argument("--test-tiles", type=str, default=None)

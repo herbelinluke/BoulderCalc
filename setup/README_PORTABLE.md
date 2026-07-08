@@ -1,6 +1,13 @@
 # Portable Boulder Training Guide
 
-Run Detectron2 boulder training on another machine (including **Windows + GPU, no admin access**) using files copied to a USB stick.
+Run Detectron2 boulder training on another machine using files copied to a USB stick.
+
+> **Windows users:** this file is the general pipeline reference. For
+> step-by-step Windows setup use:
+>
+> - `README_WINDOWS.md` — normal or admin account
+> - `README_WINDOWS_GUEST.md` — guest / restricted account (miniconda, no
+>   admin, 260-char path limit workarounds)
 
 ---
 
