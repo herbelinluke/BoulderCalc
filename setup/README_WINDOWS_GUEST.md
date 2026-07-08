@@ -81,17 +81,25 @@ Then install:
 ```bat
 cd B:\
 pip install --no-cache-dir -r BoulderCalculator\setup\requirements-training.txt
-pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install --no-cache-dir detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu124/torch2.4/index.html
+
+:: nvidia-smi "CUDA Version" is the driver's MAX supported version (backward
+:: compatible) -- no need to match exactly. cu130 mirrors the proven Linux
+:: setup (torch 2.12.1 + cu130).
+pip install --no-cache-dir torch==2.12.1 torchvision --index-url https://download.pytorch.org/whl/cu130
 ```
 
-If no Detectron2 wheel matches the machine's torch/CUDA, build from source —
-clone to a *short* directory:
+Detectron2 has **no official Windows wheels** — build from source. Clone to a
+*short* directory and run from the "x64 Native Tools Command Prompt" (so
+`cl.exe` is on PATH); re-run the cache `set` commands there first:
 
 ```bat
 git clone https://github.com/facebookresearch/detectron2.git B:\d2
 pip install --no-cache-dir -e B:\d2
 ```
+
+If the build skips CUDA extensions (no `CUDA_HOME`), that is fine: standard
+Mask R-CNN gets its GPU ops from torchvision's precompiled wheel, so GPU
+training works without installing the CUDA toolkit.
 
 Verify GPU:
 
