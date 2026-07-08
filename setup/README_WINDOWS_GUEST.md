@@ -93,8 +93,18 @@ Detectron2 has **no official Windows wheels** — build from source. Clone to a
 `cl.exe` is on PATH); re-run the cache `set` commands there first:
 
 ```bat
+:: Move to source destination
 git clone https://github.com/facebookresearch/detectron2.git B:\d2
-pip install --no-cache-dir -e B:\d2
+
+:: Initialize clean x64 developer environment
+call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+:: Force CPU extension compilation (torchvision wheel provides the actual GPU ops)
+set FORCE_CUDA=0
+set DISTUTILS_USE_SDK=1
+
+:: Build and install
+pip install --no-cache-dir -e B:\d2 --no-build-isolation
 ```
 
 If the build skips CUDA extensions (no `CUDA_HOME`), that is fine: standard
@@ -148,6 +158,8 @@ Before logging out: copy `segmentation\training_run_v3_aug\` (at minimum
 | `subst` drive disappeared | Re-run `subst B: <path>` — mappings reset every logout |
 | Permission denied writing outputs | Guest may not write outside its profile/Public — keep everything under the chosen root |
 | Profile wiped after logout | Expected on true Guest accounts — work from USB/second drive and copy results off first |
+ProblemFixpip: OSError ... filename too long / [WinError 206]Paths still too deep — move root closer to a drive letter, use subst, re-check the set cache redirects ran in this terminal  conda env activates but wrong pythonconda activate B:\env (full path, not a name); check where python  vcvarsall.bat throws Windows SDK errorDo not specify a fallback version parameter (like 8.1). Run vcvarsall.bat x64 to cleanly inherit your machine's primary SDK.Building detectron2 crashes on DISTUTILS_USE_SDKMake sure you explicitly execute set DISTUTILS_USE_SDK=1 and set FORCE_CUDA=0 right before calling pip install.Downloads fail mid-train (weights)Pre-download once on another machine and copy into B:\cache\fvcore\detectron2\..., or re-run — the download resumes  subst drive disappearedRe-run subst B: <path> — mappings reset every logout  Permission denied writing outputsGuest may not write outside its profile/Public — keep everything under the chosen root  Profile wiped after logoutExpected on true Guest accounts — work from USB/second drive and copy results off first  
+
 
 Session checklist (every login): `subst` (if used) → `set` cache variables →
 `conda activate B:\env` → work from `B:\`.
