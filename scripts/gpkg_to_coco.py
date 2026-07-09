@@ -2,20 +2,20 @@
 """Convert a QGIS GPKG annotation layer + GeoTIFF tiles into Detectron2 COCO JSON.
 
 Supports year-based tile layouts under segmentation/tiling/{24,25}/, ROI as
-shapefile or GeoPackage, and boulder-only training (deposit polygons dropped).
+shapefile or GeoPackage (one or many, unioned), multi-year training in one
+dataset, and boulder-only mode (deposit polygons dropped).
 
 Class attribute handling:
   - numeric 0 / missing / string "Boulder"  -> Boulder (COCO category 1)
   - numeric 1 / string containing "deposit" -> BoulderDeposit (dropped when
-    --boulder-only is set, which is the default for the 2024 workflow)
+    --boulder-only is set, which is the default)
 
-Example (2024 boulder-only):
+Example (both years, boulder-only, merged annotations):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
         --segmentation-dir segmentation \\
-        --year 24 \\
-        --gpkg segmentation/annotations/july8_24annot.gpkg \\
-        --roi segmentation/tile_extents/roi_24_0709.gpkg \\
-        --output-dir segmentation/coco_dataset_24 \\
+        --years 24,25 \\
+        --gpkg segmentation/annotations/july9_input.gpkg \\
+        --output-dir segmentation/coco_dataset_both \\
         --min-area-m2 1.0
 """
 
@@ -94,16 +94,54 @@ def tile_filename(key: str, year: int = 25) -> str:
     return f"25IniSouthOrt_{row:02d}_{col:02d}.tif"
 
 
-def resolve_tile_path(tile_dir: Path, key: str, year: int) -> Path:
-    """Find a tile under tiling/{year}/ or flat tiling/ (legacy)."""
-    name = tile_filename(key, year)
+def parse_year_key(key: str, default_year: int | None = None) -> tuple[int, str]:
+    """Parse '14_15' or '24_14_15' into (year, '14_15')."""
+    parts = key.strip().split("_")
+    if len(parts) == 3 and parts[0] in ("24", "25"):
+        return int(parts[0]), f"{int(parts[1])}_{int(parts[2])}"
+    if len(parts) == 2:
+        if default_year is None:
+            raise ValueError(f"Tile key {key!r} needs a year prefix (e.g. 24_14_15) or --year")
+        return default_year, f"{int(parts[0])}_{int(parts[1])}"
+    raise ValueError(f"Bad tile key: {key}")
+
+
+def year_key(year: int, key: str) -> str:
+    row, col = normalize_key(key)
+    return f"{year}_{row:02d}_{col:02d}"
+
+
+def expand_year_keys(years: list[int]) -> tuple[list[str], list[str], list[str]]:
+    """Return (train, valid, test) year-prefixed keys for the given years."""
+    train, valid, test = [], [], []
+    for year in years:
+        tiles = TILES_24 if year == 24 else TILES_25
+        valid_set = set(VALID_24 if year == 24 else VALID_25)
+        test_set = set(TEST_24 if year == 24 else TEST_25)
+        for key in tiles:
+            yk = year_key(year, key)
+            if key in valid_set:
+                valid.append(yk)
+            elif key in test_set:
+                test.append(yk)
+            else:
+                train.append(yk)
+    return train, valid, test
+
+
+def resolve_tile_path(tile_dir: Path, key: str, year: int | None = None) -> Path:
+    """Find a tile under tiling/{year}/ or flat tiling/ (legacy).
+
+    ``key`` may be ``14_15`` (with year=) or year-prefixed ``24_14_15``.
+    """
+    year, short = parse_year_key(key, year)
+    name = tile_filename(short, year)
     candidates = [
         tile_dir / str(year) / name,
         tile_dir / name,
     ]
-    # Also try unpadded 25-style names for older flat layouts.
     if year == 25:
-        row, col = normalize_key(key)
+        row, col = normalize_key(short)
         candidates.append(tile_dir / f"25IniSouthOrt_{row}_{col}.tif")
         candidates.append(tile_dir / "25" / f"25IniSouthOrt_{row}_{col}.tif")
     for path in candidates:
@@ -310,7 +348,6 @@ def build_split(
     split_name: str,
     tile_keys: list[str],
     tile_dir: Path,
-    year: int,
     output_dir: Path,
     feats: list[tuple],
     roi,
@@ -326,14 +363,20 @@ def build_split(
     ann_id = 1
     per_class_total = {1: 0, 2: 0}
     categories = CATEGORIES_ONE if boulder_only else CATEGORIES_TWO
+    years_used: set[int] = set()
 
     for key in tile_keys:
-        src_image = resolve_tile_path(tile_dir, key, year)
-        shutil.copy2(src_image, split_image_dir / src_image.name)
+        year, _ = parse_year_key(key)
+        years_used.add(year)
+        src_image = resolve_tile_path(tile_dir, key)
+        # Year-prefix copied filenames so 24/25 tiles never collide in one split dir.
+        dst_name = f"{year}_{src_image.name}"
+        shutil.copy2(src_image, split_image_dir / dst_name)
 
         image_info, anns, ann_id, per_class = convert_tile(
             src_image, feats, roi, image_id, ann_id, min_area_m2, boulder_only
         )
+        image_info["file_name"] = dst_name
         images.append(image_info)
         annotations.extend(anns)
         for k, v in per_class.items():
@@ -345,7 +388,10 @@ def build_split(
         "info": {
             "contributor": "",
             "date_created": "",
-            "description": f"Boulder training split: {split_name} (year={year})",
+            "description": (
+                f"Boulder training split: {split_name} "
+                f"(years={sorted(years_used)})"
+            ),
             "url": "",
             "version": "3.0",
             "year": "2026",
@@ -364,7 +410,7 @@ def build_split(
     out_json.write_text(json.dumps(coco))
     return {
         "split": split_name,
-        "year": year,
+        "years": sorted(years_used),
         "tiles": tile_keys,
         "images": len(images),
         "annotations": len(annotations),
@@ -376,20 +422,21 @@ def build_split(
 
 
 def write_tile_extents(
-    tile_keys: list[str], tile_dir: Path, year: int, out_path: Path
+    tile_keys: list[str], tile_dir: Path, out_path: Path
 ) -> None:
     features = []
     for key in tile_keys:
         try:
-            path = resolve_tile_path(tile_dir, key, year)
-        except FileNotFoundError:
+            path = resolve_tile_path(tile_dir, key)
+            year, short = parse_year_key(key)
+        except (FileNotFoundError, ValueError):
             continue
         with rasterio.open(path) as ds:
             poly = box(*ds.bounds)
         features.append(
             {
                 "type": "Feature",
-                "properties": {"tile": key, "year": year, "file": path.name},
+                "properties": {"tile": short, "year": year, "file": path.name},
                 "geometry": mapping(poly),
             }
         )
@@ -409,44 +456,89 @@ def parse_tile_list(value: str | None, default: list[str]) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def default_paths(year: int, seg_dir: Path) -> tuple[Path, Path, Path]:
-    """Return (gpkg, roi, output_dir) defaults for a year."""
-    if year == 24:
+def parse_years(value: str | None, default: list[int]) -> list[int]:
+    if not value:
+        return default
+    years = sorted({int(p.strip()) for p in value.split(",") if p.strip()})
+    for y in years:
+        if y not in (24, 25):
+            raise ValueError(f"Unsupported year: {y}")
+    return years
+
+
+def parse_path_list(value: str | None) -> list[Path] | None:
+    if value is None:
+        return None
+    if str(value).lower() == "none":
+        return []
+    return [Path(p.strip()) for p in str(value).split(",") if p.strip()]
+
+
+def default_paths(years: list[int], seg_dir: Path) -> tuple[Path, list[Path], Path]:
+    """Return (gpkg, rois, output_dir) defaults for the selected years."""
+    if years == [24]:
         return (
-            seg_dir / "annotations" / "july8_24annot.gpkg",
-            seg_dir / "tile_extents" / "roi_24_0709.gpkg",
+            seg_dir / "annotations" / "july9_24input.gpkg",
+            [seg_dir / "tile_extents" / "roi_24_0709.gpkg"],
             seg_dir / "coco_dataset_24",
         )
+    if years == [25]:
+        return (
+            seg_dir / "annotations" / "july9_25input.gpkg",
+            [seg_dir / "tile_extents" / "roi.shp"],
+            seg_dir / "coco_dataset_25",
+        )
+    # Both years: merged annotations + union of both ROIs.
     return (
-        seg_dir / "annotations" / "july7_training_input.gpkg",
-        seg_dir / "tile_extents" / "roi.shp",
-        seg_dir / "coco_dataset_v3",
+        seg_dir / "annotations" / "july9_input.gpkg",
+        [
+            seg_dir / "tile_extents" / "roi_24_0709.gpkg",
+            seg_dir / "tile_extents" / "roi.shp",
+        ],
+        seg_dir / "coco_dataset_both",
     )
+
+
+def load_rois(roi_paths: list[Path]):
+    """Union ROI polygons from one or more .shp/.gpkg files."""
+    geoms = []
+    for path in roi_paths:
+        geoms.append(load_roi(path))
+        print(f"ROI: {path}")
+    if not geoms:
+        return None
+    return unary_union(geoms) if len(geoms) > 1 else geoms[0]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--segmentation-dir", type=Path, default=Path("segmentation"))
     parser.add_argument(
+        "--years",
+        type=str,
+        default="24,25",
+        help="Comma-separated ortho years to include (default: 24,25). Use 24 or 25 alone for a single year.",
+    )
+    parser.add_argument(
         "--year",
         type=int,
         choices=[24, 25],
-        default=24,
-        help="Ortho year: 24 -> tiling/24/Sites1and2_2024_..., 25 -> tiling/25/25IniSouthOrt_...",
+        default=None,
+        help="Deprecated alias for a single year; prefer --years.",
     )
     parser.add_argument(
         "--gpkg",
         type=Path,
         default=None,
-        help="Annotation GPKG (default depends on --year)",
+        help="Annotation GPKG (default: july9_input.gpkg for both years)",
     )
     parser.add_argument("--layer", type=str, default=None)
     parser.add_argument("--class-field", type=str, default="Class")
     parser.add_argument(
         "--roi",
-        type=Path,
+        type=str,
         default=None,
-        help="ROI .shp or .gpkg (default depends on --year; pass 'none' to disable)",
+        help="Comma-separated ROI .shp/.gpkg paths (default: both year ROIs; pass 'none' to disable)",
     )
     parser.add_argument("--tile-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -472,28 +564,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    years = [args.year] if args.year is not None else parse_years(args.years, [24, 25])
     seg_dir = args.segmentation_dir
-    default_gpkg, default_roi, default_out = default_paths(args.year, seg_dir)
+    default_gpkg, default_rois, default_out = default_paths(years, seg_dir)
     gpkg = args.gpkg or default_gpkg
     tile_dir = args.tile_dir or (seg_dir / "tiling")
     output_dir = args.output_dir or default_out
 
-    all_tiles = TILES_24 if args.year == 24 else TILES_25
-    valid_default = VALID_24 if args.year == 24 else VALID_25
-    test_default = TEST_24 if args.year == 24 else TEST_25
-    train_default = [k for k in all_tiles if k not in valid_default + test_default]
+    train_default, valid_default, test_default = expand_year_keys(years)
 
-    roi = None
-    if args.roi is None:
-        if default_roi.exists():
-            roi = load_roi(default_roi)
-            print(f"ROI: {default_roi}")
-        else:
-            print(f"ROI default missing ({default_roi}); continuing without ROI clip")
-    elif str(args.roi).lower() != "none":
-        roi = load_roi(args.roi)
-        print(f"ROI: {args.roi}")
+    roi_paths = parse_path_list(args.roi)
+    if roi_paths is None:
+        roi_paths = [p for p in default_rois if p.exists()]
+        missing = [p for p in default_rois if not p.exists()]
+        for p in missing:
+            print(f"ROI default missing ({p}); skipping")
+    if roi_paths:
+        roi = load_rois(roi_paths)
     else:
+        roi = None
         print("ROI: none")
 
     feats = load_annotations(gpkg, args.layer, args.class_field, args.boulder_only)
@@ -504,29 +593,45 @@ def main() -> None:
         f"Loaded {len(feats)} features from {gpkg} "
         f"({n_boulder} Boulder, {n_deposit} BoulderDeposit) [{mode}]"
     )
+    print(f"Years: {years}")
 
     train_tiles = parse_tile_list(args.train_tiles, train_default)
     valid_tiles = parse_tile_list(args.valid_tiles, valid_default)
     test_tiles = parse_tile_list(args.test_tiles, test_default)
+    # Allow unprefixed overrides by attaching the sole year when only one year is selected.
+    if len(years) == 1:
+        y = years[0]
+        def ensure_year(keys: list[str]) -> list[str]:
+            out = []
+            for k in keys:
+                try:
+                    parse_year_key(k)
+                    out.append(k)
+                except ValueError:
+                    out.append(year_key(y, k))
+            return out
+        train_tiles = ensure_year(train_tiles)
+        valid_tiles = ensure_year(valid_tiles)
+        test_tiles = ensure_year(test_tiles)
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.write_extents:
-        extents_path = seg_dir / "tile_extents" / f"tile_extents_{args.year}_auto.geojson"
-        write_tile_extents(
-            train_tiles + valid_tiles + test_tiles, tile_dir, args.year, extents_path
-        )
+        tag = "_".join(str(y) for y in years)
+        extents_path = seg_dir / "tile_extents" / f"tile_extents_{tag}_auto.geojson"
+        write_tile_extents(train_tiles + valid_tiles + test_tiles, tile_dir, extents_path)
 
     summary = [
         build_split(
-            "train", train_tiles, tile_dir, args.year, output_dir,
+            "train", train_tiles, tile_dir, output_dir,
             feats, roi, args.min_area_m2, args.boulder_only,
         ),
         build_split(
-            "valid", valid_tiles, tile_dir, args.year, output_dir,
+            "valid", valid_tiles, tile_dir, output_dir,
             feats, roi, args.min_area_m2, args.boulder_only,
         ),
         build_split(
-            "test", test_tiles, tile_dir, args.year, output_dir,
+            "test", test_tiles, tile_dir, output_dir,
             feats, roi, args.min_area_m2, args.boulder_only,
         ),
     ]

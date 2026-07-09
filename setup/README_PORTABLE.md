@@ -110,37 +110,33 @@ pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu124
 
 Activate the venv first (`call .venv_boulder\Scripts\activate.bat` on Windows).
 
-### Step 1 (current) — Build 2024 boulder-only COCO from GPKG + tiles
+### Step 1 (current) — Build both-years boulder-only COCO from GPKG + tiles
 
-Tiles live under `segmentation/tiling/24/` as
-`Sites1and2_2024_Orthomosaic_RR_CC.tif`. Annotations are a single GPKG;
-deposit polygons (`Class=1`) are dropped by default (`--boulder-only`).
-ROI may be a `.gpkg` or `.shp`.
+Tiles live under `segmentation/tiling/24/` and `segmentation/tiling/25/`.
+Use the merged annotations GPKG; deposit polygons (`Class=1`) are dropped by
+default. Both ROIs are unioned automatically.
 
 ```bat
 python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --segmentation-dir segmentation ^
-  --year 24 ^
-  --output-dir segmentation\coco_dataset_24 ^
+  --years 24,25 ^
+  --output-dir segmentation\coco_dataset_both ^
   --min-area-m2 1.0
 ```
 
-Defaults for `--year 24`: `--gpkg july8_24annot.gpkg`,
-`--roi roi_24_0709.gpkg`. For the older 2025 two-class run use
-`--year 25 --no-boulder-only`.
+Defaults for `--years 24,25`: `--gpkg july9_input.gpkg`, ROIs =
+`roi_24_0709.gpkg` + `roi.shp`. Single-year: `--years 24` or `--years 25`.
 
 Notes:
 
 - Requires `fiona` (in `requirements-training.txt`).
-- Annotations are reprojected to EPSG:25829, clipped to the ROI and each
+- Annotations are reprojected to EPSG:25829, clipped to the ROI union and each
   tile extent, then converted to pixel coordinates.
 - Categories: `1 = Boulder` only when `--boulder-only` (default).
-- `--min-area-m2 1.0` drops Boulder polygons under 1 m² (whole-geometry area).
-- `--write-extents` writes `tile_extents/tile_extents_24_auto.geojson`.
-- Splits (50 tiles: 11:7, 12:7-9, 13:7-13, 14:7-20, 15:7-20, 16:7-17):
-  - **Train (45):** everything not in valid/test
-  - **Valid (2):** 13_9, 15_15
-  - **Test (3):** 12_8, 14_15, 16_14
+- Copied tile filenames are year-prefixed (`24_...`, `25_...`) so years never
+  collide in one dataset folder.
+- Splits (~99 tiles): valid/test include hold-outs from both years
+  (24: 13_9, 15_15 / 12_8, 14_15, 16_14; 25: 05_33, 08_24 / 04_35, 05_34, 06_29).
 
 `train_boulder_local.py` reads class names from the dataset JSON automatically.
 For inference pass `--class-names "Boulder"`.
@@ -156,28 +152,28 @@ brightness/contrast jitter. Valid/test are copied unchanged.
 
 ```bat
 python BoulderCalculator\scripts\augment_coco_dataset.py ^
-  --input-dir segmentation\coco_dataset_24 ^
-  --output-dir segmentation\coco_dataset_24_aug ^
+  --input-dir segmentation\coco_dataset_both ^
+  --output-dir segmentation\coco_dataset_both_aug ^
   --jitter 0.15
 ```
 
-Then train with `--dataset-dir segmentation\coco_dataset_24_aug`. The default
+Then train with `--dataset-dir segmentation\coco_dataset_both_aug`. The default
 variant set is the full dihedral group (hflip, vflip, rot90/180/270,
 transpose, antitranspose) -- every exact orientation of a square tile -- so
-the train split grows 8x (e.g. 45 -> 360 images). With more images per epoch,
-scale `--max-iter` accordingly (the paper used images x 15 / batch 2; for 360
-images that is ~2700 iterations).
+the train split grows 8x (e.g. 89 -> 712 images). With more images per epoch,
+scale `--max-iter` accordingly (the paper used images x 15 / batch 2; for 712
+images that is ~5300 iterations).
 
-### Step 1 (legacy 2025 two-class) — Build COCO from GPKG + tiles
+### Step 1 (legacy single-year / two-class)
 
 ```bat
 python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --segmentation-dir segmentation ^
-  --year 25 ^
+  --years 25 ^
   --no-boulder-only ^
-  --gpkg segmentation\annotations\july7_training_input.gpkg ^
+  --gpkg segmentation\annotations\july9_25input.gpkg ^
   --roi segmentation\tile_extents\roi.shp ^
-  --output-dir segmentation\coco_dataset_v3
+  --output-dir segmentation\coco_dataset_25
 ```
 
 ### Step 1 (legacy) — Build COCO dataset from GeoJSON + tiles
@@ -318,9 +314,10 @@ The `_1st` / `_2nd` suffix on GeoJSON files is only a version label; the script 
 Files needed on the Windows machine (which already has `segmentation/tiling/`
 and the BoulderCalculator repo):
 
-- `segmentation/annotations/july8_24annot.gpkg`
+- `segmentation/annotations/july9_input.gpkg`
 - `segmentation/tile_extents/roi_24_0709.gpkg`
-- `segmentation/tiling/24/` (2024 ortho tiles), if not already present
+- `segmentation/tile_extents/roi.shp` + sidecars (`roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg`)
+- `segmentation/tiling/24/` and `segmentation/tiling/25/` if not already present
 - Updated repo code (`git pull`)
 - `pip install fiona` into the existing venv (or re-run the requirements install)
 
@@ -329,11 +326,11 @@ cd D:\boulder_project
 call .venv_boulder\Scripts\activate.bat
 pip install fiona
 
-python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --year 24 --output-dir segmentation\coco_dataset_24 --min-area-m2 1.0
-python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_24 --output-dir segmentation\coco_dataset_24_aug --jitter 0.15
-python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_24 --output-dir segmentation\visualizations\coco_gt_24
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_24_aug --output-dir segmentation\training_run_24 --max-iter 3000 --batch-size 2 --num-workers 4 --device cuda
-python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_24\test\Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_24\model_final.pth --gt-json segmentation\coco_dataset_24\testing_annotations.json --output-dir segmentation\visualizations\test_inference_24 --score-thresh 0.4 --device cuda --class-names "Boulder"
+python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_both --output-dir segmentation\coco_dataset_both_aug --jitter 0.15
+python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 5000 --batch-size 2 --num-workers 4 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_both\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_both\model_final.pth --gt-json segmentation\coco_dataset_both\testing_annotations.json --output-dir segmentation\visualizations\test_inference_both --score-thresh 0.4 --device cuda --class-names "Boulder"
 ```
 
 ## Quick copy-paste checklist (GPU Windows, legacy 1-class)

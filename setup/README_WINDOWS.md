@@ -9,14 +9,15 @@ Assumes the machine already has:
 - The BoulderCalculator repo (`git clone` / `git pull`)
 - `segmentation/tiling/` (ortho tiles)
 
-Files to copy over for the current (2024 boulder-only) training input:
+Files to copy over for the current (both-years boulder-only) training input:
 
 | File | Purpose |
 |------|---------|
-| `segmentation/annotations/july8_24annot.gpkg` | 2024 annotations (missing Class / 0 = Boulder; Class 1 = deposit, dropped) |
-| `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI mask (GeoPackage — no shapefile sidecars) |
-| `segmentation/tiling/24/*.tif` | 2024 ortho tiles (`Sites1and2_2024_Orthomosaic_RR_CC.tif`) |
-| `2024/Sites1and2_2024_DSM_30mm.tif` (optional) | Only for hillshade / local-relief experiments |
+| `segmentation/annotations/july9_input.gpkg` | Merged 2024+2025 annotations (Class 1 deposits dropped) |
+| `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI |
+| `segmentation/tile_extents/roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI (all sidecars required) |
+| `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
+| `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
 
 ---
 
@@ -77,41 +78,40 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 ---
 
-## 2. Full workflow (2024 boulder-only)
+## 2. Full workflow (both years, boulder-only)
 
-Run from the project root (folder containing `BoulderCalculator\` and
-`segmentation\`). Tiles live under `segmentation\tiling\24\`.
+Run from the project root. Tiles live under `segmentation\tiling\24\` and
+`segmentation\tiling\25\`. One conversion pass uses the merged GPKG and unions
+both ROIs — no need to train years separately.
 
 ```bat
-:: Step 1 - GPKG + ROI + 2024 tiles -> 1-class COCO (50 tiles).
-::   --boulder-only (default) drops Class=1 deposit polygons.
-::   --min-area-m2 1.0 drops Boulder polygons under 1 m2 (whole-geometry area).
-python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --year 24 --output-dir segmentation\coco_dataset_24 --min-area-m2 1.0
+:: Step 1 - merged GPKG + both ROIs + 24/25 tiles -> 1-class COCO (~99 tiles).
+::   --years 24,25 is the default. --boulder-only (default) drops deposits.
+python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
-:: Step 2 - offline augmentation (8x train split: flips, rotations, transposes + jitter)
-python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_24 --output-dir segmentation\coco_dataset_24_aug --jitter 0.15
+:: Step 2 - offline augmentation (8x train split)
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_both --output-dir segmentation\coco_dataset_both_aug --jitter 0.15
 
-:: Step 3 - visual QA of ground truth
-python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_24 --output-dir segmentation\visualizations\coco_gt_24
+:: Step 3 - visual QA
+python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
 
-:: Step 4 - train (~2600-3000 iters for an ~360-image augmented split at batch 2)
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_24_aug --output-dir segmentation\training_run_24 --max-iter 3000 --batch-size 2 --num-workers 4 --device cuda
+:: Step 4 - train (scale iters with image count; ~89 train tiles x 8 aug ~= 712 images -> ~5000 iters at batch 2)
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 5000 --batch-size 2 --num-workers 4 --device cuda
 
-:: Step 5 - inference + GT comparison on a test tile
-python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_24\test\Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_24\model_final.pth --gt-json segmentation\coco_dataset_24\testing_annotations.json --output-dir segmentation\visualizations\test_inference_24 --score-thresh 0.4 --device cuda --class-names "Boulder"
+:: Step 5 - inference (filenames are year-prefixed in the COCO dataset)
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_both\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_both\model_final.pth --gt-json segmentation\coco_dataset_both\testing_annotations.json --output-dir segmentation\visualizations\test_inference_both --score-thresh 0.4 --device cuda --class-names "Boulder"
 ```
 
 Notes:
 
-- Defaults for `--year 24`: `--gpkg july8_24annot.gpkg`, `--roi roi_24_0709.gpkg`,
-  tiles under `tiling\24\`. ROI may be `.gpkg` or `.shp`.
-- `--boulder-only` is on by default (1-class COCO). Pass `--no-boulder-only`
-  only if you want deposits kept as a second class.
-- `train_boulder_local.py` reads class names from the dataset JSON automatically.
-- Splits (2024): valid = 13_9, 15_15; test = 12_8, 14_15, 16_14; train = the
-  other 45 tiles. Override with `--train-tiles/--valid-tiles/--test-tiles`.
-- For the older 2025 two-class run: `--year 25 --no-boulder-only` and the
-  july7 GPKG / `roi.shp` / `tiling\25\` paths.
+- Defaults for `--years 24,25`: `--gpkg july9_input.gpkg`, ROIs =
+  `roi_24_0709.gpkg` + `roi.shp` (unioned). Single-year: `--years 24` or
+  `--years 25` (uses `july9_24input.gpkg` / `july9_25input.gpkg`).
+- Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
+  two years never collide in one dataset folder.
+- Hold-outs include both years: valid = 24_13_9, 24_15_15, 25_05_33, 25_08_24;
+  test = 24_12_8, 24_14_15, 24_16_14, 25_04_35, 25_05_34, 25_06_29.
+- Inference uses `--class-names "Boulder"` (single class).
 
 ## 3. Troubleshooting
 
@@ -121,5 +121,5 @@ Notes:
 | Detectron2 install fails | Match the wheel URL to your torch/CUDA; or source-build with VS Build Tools |
 | CUDA not available | Install the correct GPU torch build; check `nvidia-smi` |
 | Out of memory | `--batch-size 1`, or lower `ROI_HEADS.BATCH_SIZE_PER_IMAGE` in the train script |
-| `FileNotFoundError` on tile | Confirm tiles are under `segmentation\tiling\24\` (or `25\`) with the expected filename pattern |
+| `FileNotFoundError` on tile | Confirm tiles are under `segmentation\tiling\24\` and `25\` with the expected filename patterns |
 | Polygons shifted in QA overlays | Confirm the GPKG CRS is declared correctly (the converter reprojects automatically) |
