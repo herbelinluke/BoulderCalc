@@ -121,31 +121,31 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 | File | Purpose |
 |------|---------|
-| `segmentation\annotations\july7_training_input.gpkg` | Annotations (Class: 0 = Boulder, 1 = BoulderDeposit) |
-| `segmentation\tile_extents\roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | ROI mask (all sidecars required) |
-| `segmentation\tiling\*.tif` | Ortho tiles (if not already present) |
+| `segmentation\annotations\july8_24annot.gpkg` | 2024 annotations (missing Class / 0 = Boulder; Class 1 = deposit, dropped) |
+| `segmentation\tile_extents\roi_24_0709.gpkg` | 2024 ROI (GeoPackage — no shapefile sidecars) |
+| `segmentation\tiling\24\*.tif` | 2024 ortho tiles |
 
-## 5. Workflow (from `B:\`)
+## 5. Workflow (from `B:\`) — 2024 boulder-only
 
 ```bat
-:: 1. GPKG -> COCO. --min-area-m2 1.0 drops Boulder polygons under 1 m2
-::    (whole-geometry area); deposits are never filtered. Omit to keep all.
-python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --output-dir segmentation\coco_dataset_v3 --min-area-m2 1.0
+:: 1. GPKG -> COCO. --boulder-only (default) drops deposits; --min-area-m2 1.0
+::    drops Boulder polygons under 1 m2 (whole-geometry area).
+python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --year 24 --output-dir segmentation\coco_dataset_24 --min-area-m2 1.0
 
 :: 2. Offline augmentation (8x train split)
-python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_v3 --output-dir segmentation\coco_dataset_v3_aug --jitter 0.15
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_24 --output-dir segmentation\coco_dataset_24_aug --jitter 0.15
 
 :: 3. GT QA overlays
-python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_v3 --output-dir segmentation\visualizations\coco_gt_v3
+python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_24 --output-dir segmentation\visualizations\coco_gt_24
 
 :: 4. Train (needs internet once for base weights, ~170 MB -> B:\cache\fvcore)
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_v3_aug --output-dir segmentation\training_run_v3_aug --max-iter 3000 --batch-size 2 --num-workers 2 --device cuda
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_24_aug --output-dir segmentation\training_run_24 --max-iter 3000 --batch-size 2 --num-workers 2 --device cuda
 
 :: 5. Inference on a test tile
-python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_v3\test\25IniSouthOrt_06_29.tif --model segmentation\training_run_v3_aug\model_final.pth --gt-json segmentation\coco_dataset_v3\testing_annotations.json --output-dir segmentation\visualizations\test_inference_v3 --score-thresh 0.4 --device cuda --class-names "Boulder,BoulderDeposit"
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_24\test\Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_24\model_final.pth --gt-json segmentation\coco_dataset_24\testing_annotations.json --output-dir segmentation\visualizations\test_inference_24 --score-thresh 0.4 --device cuda --class-names "Boulder"
 ```
 
-Before logging out: copy `segmentation\training_run_v3_aug\` (at minimum
+Before logging out: copy `segmentation\training_run_24\` (at minimum
 `model_final.pth`, `metrics.json`, `metrics_valid.json`) somewhere permanent.
 
 ## 6. Guest-account troubleshooting

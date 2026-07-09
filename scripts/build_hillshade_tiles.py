@@ -20,7 +20,7 @@ from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gpkg_to_coco import ALL_TILES, tile_filename  # noqa: E402
+from gpkg_to_coco import TILES_24, TILES_25, resolve_tile_path, tile_filename  # noqa: E402
 
 
 def fill_dem(dem: np.ndarray) -> np.ndarray:
@@ -130,9 +130,9 @@ def build_tile_dsm_image(
     }
 
 
-def parse_tile_keys(value: str) -> list[str]:
+def parse_tile_keys(value: str, year: int) -> list[str]:
     if not value:
-        return list(ALL_TILES)
+        return list(TILES_24 if year == 24 else TILES_25)
     return [k.strip() for k in value.split(",") if k.strip()]
 
 
@@ -141,7 +141,8 @@ def main() -> None:
     parser.add_argument(
         "--dsm",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/2025/25IniSouthDSM.tif"),
+        default=None,
+        help="DSM GeoTIFF (default: 2024 or 2025 DSM under project root depending on --year)",
     )
     parser.add_argument(
         "--ortho-dir",
@@ -152,7 +153,14 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=None,
-        help="Default: tiling_hillshade or tiling_local_relief depending on --mode",
+        help="Default: tiling_{mode}_{year} under the segmentation root",
+    )
+    parser.add_argument(
+        "--year",
+        type=int,
+        choices=[24, 25],
+        default=24,
+        help="Ortho year matching gpkg_to_coco.py (24 or 25).",
     )
     parser.add_argument(
         "--mode",
@@ -163,7 +171,7 @@ def main() -> None:
         "--tile-keys",
         type=str,
         default="",
-        help="Comma-separated tile keys (e.g. 08_22,07_24). Default: all v2 ALL_TILES.",
+        help="Comma-separated tile keys (e.g. 14_15,15_10). Default: all tiles for --year.",
     )
     parser.add_argument("--azimuth", type=float, default=315.0)
     parser.add_argument("--altitude", type=float, default=45.0)
@@ -175,21 +183,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    project_root = args.ortho_dir.parent.parent if args.ortho_dir.name == "tiling" else args.ortho_dir.parent
+    if args.dsm is None:
+        if args.year == 24:
+            args.dsm = project_root / "2024" / "Sites1and2_2024_DSM_30mm.tif"
+        else:
+            args.dsm = project_root / "2025" / "25IniSouthDSM.tif"
     if not args.dsm.exists():
         raise FileNotFoundError(args.dsm)
 
-    seg_root = args.ortho_dir.parent
+    seg_root = args.ortho_dir.parent if args.ortho_dir.name == "tiling" else args.ortho_dir
     if args.output_dir is None:
-        subdir = "tiling_local_relief" if args.mode == "local_relief" else "tiling_hillshade"
+        subdir = f"tiling_{args.mode}_{args.year}"
         args.output_dir = seg_root / subdir
 
-    keys = parse_tile_keys(args.tile_keys)
+    keys = parse_tile_keys(args.tile_keys, args.year)
     summary = []
-    for key in tqdm(keys, desc=args.mode):
-        ortho_path = args.ortho_dir / tile_filename(key)
-        out_path = args.output_dir / tile_filename(key)
-        if not ortho_path.exists():
-            raise FileNotFoundError(ortho_path)
+    for key in tqdm(keys, desc=f"{args.mode}/{args.year}"):
+        ortho_path = resolve_tile_path(args.ortho_dir, key, args.year)
+        out_path = args.output_dir / tile_filename(key, args.year)
         summary.append(
             build_tile_dsm_image(
                 ortho_path,

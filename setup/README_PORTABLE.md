@@ -110,44 +110,40 @@ pip install detectron2 -f https://dl.fbaipublicfiles.com/detectron2/wheels/cu124
 
 Activate the venv first (`call .venv_boulder\Scripts\activate.bat` on Windows).
 
-### Step 1 (v2, current) — Build two-class COCO dataset from GPKG + tiles
+### Step 1 (current) — Build 2024 boulder-only COCO from GPKG + tiles
 
-The current annotation source is a single QGIS GeoPackage with a `Class`
-attribute (`0` = Boulder, `1` = BoulderDeposit) plus an ROI polygon layer
-(`roi.shp`) that masks out areas landward of the rock wall. Tile extents are
-computed from the GeoTIFFs directly — no `tile_extents` GPKG files are needed.
+Tiles live under `segmentation/tiling/24/` as
+`Sites1and2_2024_Orthomosaic_RR_CC.tif`. Annotations are a single GPKG;
+deposit polygons (`Class=1`) are dropped by default (`--boulder-only`).
+ROI may be a `.gpkg` or `.shp`.
 
 ```bat
 python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --segmentation-dir segmentation ^
-  --gpkg segmentation\annotations\july7_training_input.gpkg ^
-  --roi segmentation\tile_extents\roi.shp ^
-  --output-dir segmentation\coco_dataset_v3
+  --year 24 ^
+  --output-dir segmentation\coco_dataset_24 ^
+  --min-area-m2 1.0
 ```
 
-(`--gpkg` and `--roi` default to those paths, so they can be omitted.)
+Defaults for `--year 24`: `--gpkg july8_24annot.gpkg`,
+`--roi roi_24_0709.gpkg`. For the older 2025 two-class run use
+`--year 25 --no-boulder-only`.
 
 Notes:
 
 - Requires `fiona` (in `requirements-training.txt`).
-- Annotations are reprojected from EPSG:4326 to EPSG:25829, clipped to the ROI
-  union and each tile's extent, then converted to pixel coordinates.
-- Categories: `1 = Boulder`, `2 = BoulderDeposit`.
-- `--min-area-m2 1.5` optionally drops small features (default: no size filter).
-- `--write-extents` also writes `tile_extents/tile_extents_auto.geojson`
-  (all tile footprints in EPSG:25829, for QGIS reference).
-- Splits (49 tiles: rows 11_17-18, 10_17-21, 09_18-25, 08_20-27, 07_24-29,
-  06_27-31, 05_30-35, 04_33-38, 03_36-38):
-  - **Train (44):** everything not in valid/test
-  - **Valid (2):** 05_33, 08_24
-  - **Test (3):** 04_35, 05_34, 06_29
-  - Override with `--train-tiles/--valid-tiles/--test-tiles` (comma-separated
-    keys like `08_22`).
+- Annotations are reprojected to EPSG:25829, clipped to the ROI and each
+  tile extent, then converted to pixel coordinates.
+- Categories: `1 = Boulder` only when `--boulder-only` (default).
+- `--min-area-m2 1.0` drops Boulder polygons under 1 m² (whole-geometry area).
+- `--write-extents` writes `tile_extents/tile_extents_24_auto.geojson`.
+- Splits (50 tiles: 11:7, 12:7-9, 13:7-13, 14:7-20, 15:7-20, 16:7-17):
+  - **Train (45):** everything not in valid/test
+  - **Valid (2):** 13_9, 15_15
+  - **Test (3):** 12_8, 14_15, 16_14
 
-`train_boulder_local.py` reads class names from the dataset JSON automatically,
-so the same command works for 1-class and 2-class datasets. For inference
-scripts pass `--class-names "Boulder,BoulderDeposit"` for models trained on the
-v2 dataset.
+`train_boulder_local.py` reads class names from the dataset JSON automatically.
+For inference pass `--class-names "Boulder"`.
 
 ### Step 1b (optional) — Offline dataset augmentation
 
@@ -160,17 +156,29 @@ brightness/contrast jitter. Valid/test are copied unchanged.
 
 ```bat
 python BoulderCalculator\scripts\augment_coco_dataset.py ^
-  --input-dir segmentation\coco_dataset_v3 ^
-  --output-dir segmentation\coco_dataset_v3_aug ^
+  --input-dir segmentation\coco_dataset_24 ^
+  --output-dir segmentation\coco_dataset_24_aug ^
   --jitter 0.15
 ```
 
-Then train with `--dataset-dir segmentation\coco_dataset_v3_aug`. The default
+Then train with `--dataset-dir segmentation\coco_dataset_24_aug`. The default
 variant set is the full dihedral group (hflip, vflip, rot90/180/270,
 transpose, antitranspose) -- every exact orientation of a square tile -- so
-the train split grows 8x (e.g. 44 -> 352 images). With more images per epoch,
-scale `--max-iter` accordingly (the paper used images x 15 / batch 2; for 352
-images that is ~2600 iterations).
+the train split grows 8x (e.g. 45 -> 360 images). With more images per epoch,
+scale `--max-iter` accordingly (the paper used images x 15 / batch 2; for 360
+images that is ~2700 iterations).
+
+### Step 1 (legacy 2025 two-class) — Build COCO from GPKG + tiles
+
+```bat
+python BoulderCalculator\scripts\gpkg_to_coco.py ^
+  --segmentation-dir segmentation ^
+  --year 25 ^
+  --no-boulder-only ^
+  --gpkg segmentation\annotations\july7_training_input.gpkg ^
+  --roi segmentation\tile_extents\roi.shp ^
+  --output-dir segmentation\coco_dataset_v3
+```
 
 ### Step 1 (legacy) — Build COCO dataset from GeoJSON + tiles
 
@@ -310,11 +318,10 @@ The `_1st` / `_2nd` suffix on GeoJSON files is only a version label; the script 
 Files needed on the Windows machine (which already has `segmentation/tiling/`
 and the BoulderCalculator repo):
 
-- `segmentation/annotations/july7_training_input.gpkg`
-- `segmentation/tile_extents/roi.shp` + sidecars (`roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg`)
-- Updated repo code (`git pull`): `gpkg_to_coco.py`, `augment_coco_dataset.py`,
-  updated `train_boulder_local.py`, `run_tile_inference.py`,
-  `run_boulder_detection.py`, `build_hillshade_tiles.py`, `requirements-training.txt`
+- `segmentation/annotations/july8_24annot.gpkg`
+- `segmentation/tile_extents/roi_24_0709.gpkg`
+- `segmentation/tiling/24/` (2024 ortho tiles), if not already present
+- Updated repo code (`git pull`)
 - `pip install fiona` into the existing venv (or re-run the requirements install)
 
 ```bat
@@ -322,11 +329,11 @@ cd D:\boulder_project
 call .venv_boulder\Scripts\activate.bat
 pip install fiona
 
-python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --output-dir segmentation\coco_dataset_v3
-python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_v3 --output-dir segmentation\coco_dataset_v3_aug --jitter 0.15
-python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_v3 --output-dir segmentation\visualizations\coco_gt_v3
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_v3_aug --output-dir segmentation\training_run_v3_aug --max-iter 3000 --batch-size 2 --num-workers 4 --device cuda
-python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_v3\test\25IniSouthOrt_06_29.tif --model segmentation\training_run_v3_aug\model_final.pth --gt-json segmentation\coco_dataset_v3\testing_annotations.json --output-dir segmentation\visualizations\test_inference_v3 --score-thresh 0.4 --device cuda --class-names "Boulder,BoulderDeposit"
+python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --year 24 --output-dir segmentation\coco_dataset_24 --min-area-m2 1.0
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_24 --output-dir segmentation\coco_dataset_24_aug --jitter 0.15
+python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_24 --output-dir segmentation\visualizations\coco_gt_24
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_24_aug --output-dir segmentation\training_run_24 --max-iter 3000 --batch-size 2 --num-workers 4 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_24\test\Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_24\model_final.pth --gt-json segmentation\coco_dataset_24\testing_annotations.json --output-dir segmentation\visualizations\test_inference_24 --score-thresh 0.4 --device cuda --class-names "Boulder"
 ```
 
 ## Quick copy-paste checklist (GPU Windows, legacy 1-class)
@@ -347,7 +354,7 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 | Script | Purpose |
 |--------|---------|
-| `gpkg_to_coco.py` | **(v2)** GPKG (Class attr) + ROI + tiles → two-class COCO train/valid/test |
+| `gpkg_to_coco.py` | GPKG + ROI (.shp/.gpkg) + year tiles → COCO (boulder-only or two-class) |
 | `augment_coco_dataset.py` | Offline train-split augmentation (flips/rotations/jitter, paper-style) |
 | `geojson_tiles_to_coco.py` | (legacy) GeoJSON + tiles → 1-class COCO train/valid/test |
 | `visualize_coco_annotations.py` | Ground-truth polygon QA images |
