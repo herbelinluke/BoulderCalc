@@ -13,8 +13,10 @@ Files to copy over for the current (both-years boulder-only) training input:
 
 | File | Purpose |
 |------|---------|
-| `segmentation/annotations/july9_input.gpkg` | Merged 2024+2025 annotations (Class 1 deposits dropped) |
-| `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI |
+| `segmentation/annotations/july9_24input.gpkg` | 2024 annotations (preferred) |
+| `segmentation/annotations/july9_25input.gpkg` | 2025 annotations (preferred) |
+| `segmentation/annotations/july9_input.gpkg` | Optional merged fallback if per-year files are absent |
+| `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI (omit / use `--no-roi` to skip) |
 | `segmentation/tile_extents/roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI (all sidecars required) |
 | `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
 | `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
@@ -81,12 +83,14 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 ## 2. Full workflow (both years, boulder-only)
 
 Run from the project root. Tiles live under `segmentation\tiling\24\` and
-`segmentation\tiling\25\`. One conversion pass uses the merged GPKG and unions
-both ROIs — no need to train years separately.
+`segmentation\tiling\25\`. One conversion pass loads year-tagged GPKGs (24
+polys only label 24 tiles) and optionally unions both ROIs.
 
 ```bat
-:: Step 1 - merged GPKG + both ROIs + 24/25 tiles -> 1-class COCO (~99 tiles).
+:: Step 1 - per-year GPKGs + both ROIs + 24/25 tiles -> 1-class COCO (~99 tiles).
 ::   --years 24,25 is the default. --boulder-only (default) drops deposits.
+::   Defaults: july9_24input.gpkg:24 + july9_25input.gpkg:25 when present.
+::   Skip ROI: add --no-roi   Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
 :: Step 2 - offline augmentation (8x train split)
@@ -104,9 +108,10 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 Notes:
 
-- Defaults for `--years 24,25`: `--gpkg july9_input.gpkg`, ROIs =
-  `roi_24_0709.gpkg` + `roi.shp` (unioned). Single-year: `--years 24` or
-  `--years 25` (uses `july9_24input.gpkg` / `july9_25input.gpkg`).
+- Defaults for `--years 24,25`: per-year GPKGs `july9_24input.gpkg` +
+  `july9_25input.gpkg` (year-tagged; fall back to merged `july9_input.gpkg`),
+  ROIs = `roi_24_0709.gpkg` + `roi.shp` (unioned). Use `--no-roi` / `--roi none`
+  to disable ROI. Single-year: `--years 24` or `--years 25`.
 - Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
   two years never collide in one dataset folder.
 - Hold-outs include both years: valid = 24_13_9, 24_15_15, 25_05_33, 25_08_24;

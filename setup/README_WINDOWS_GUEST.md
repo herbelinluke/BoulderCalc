@@ -121,8 +121,9 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 | File | Purpose |
 |------|---------|
-| `segmentation\annotations\july9_input.gpkg` | Merged 2024+2025 annotations |
-| `segmentation\tile_extents\roi_24_0709.gpkg` | 2024 ROI |
+| `segmentation\annotations\july9_24input.gpkg` | 2024 annotations |
+| `segmentation\annotations\july9_25input.gpkg` | 2025 annotations |
+| `segmentation\tile_extents\roi_24_0709.gpkg` | 2024 ROI (optional; `--no-roi` skips) |
 | `segmentation\tile_extents\roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI |
 | `segmentation\tiling\24\*.tif` | 2024 ortho tiles |
 | `segmentation\tiling\25\*.tif` | 2025 ortho tiles |
@@ -130,7 +131,8 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 ## 5. Workflow (from `B:\`) — both years, boulder-only
 
 ```bat
-:: 1. Merged GPKG + both ROIs + 24/25 tiles -> 1-class COCO
+:: 1. Per-year GPKGs (year-tagged) + both ROIs + 24/25 tiles -> 1-class COCO
+::    Add --no-roi to skip ROI clipping.
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
 :: 2. Offline augmentation (8x train split)

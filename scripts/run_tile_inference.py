@@ -26,7 +26,22 @@ def load_rgb(path: Path) -> np.ndarray:
     return np.clip(rgb, 0, 255).astype(np.uint8)
 
 
-def draw_gt(image_rgb: np.ndarray, coco_path: Path, image_name: str) -> np.ndarray:
+def category_ids_by_name(coco: dict, exclude_classes: set[str]) -> set[int]:
+    if not exclude_classes:
+        return set()
+    return {
+        cat["id"]
+        for cat in coco.get("categories", [])
+        if cat.get("name") in exclude_classes
+    }
+
+
+def draw_gt(
+    image_rgb: np.ndarray,
+    coco_path: Path,
+    image_name: str,
+    exclude_category_ids: set[int] | None = None,
+) -> np.ndarray:
     if not coco_path.exists():
         return image_rgb
     coco = json.loads(coco_path.read_text())
@@ -34,6 +49,8 @@ def draw_gt(image_rgb: np.ndarray, coco_path: Path, image_name: str) -> np.ndarr
     out = image_rgb.copy()
     for ann in coco["annotations"]:
         if ann["image_id"] != image_id:
+            continue
+        if exclude_category_ids and ann.get("category_id") in exclude_category_ids:
             continue
         seg = ann["segmentation"][0]
         pts = np.round(np.asarray(seg, dtype=np.float32).reshape(-1, 2)).astype(np.int32)
@@ -55,8 +72,18 @@ def main() -> None:
         default="Boulder",
         help="Comma-separated class names matching the trained model (e.g. 'Boulder,BoulderDeposit').",
     )
+    parser.add_argument(
+        "--exclude-classes",
+        type=str,
+        default="",
+        help="Comma-separated class names to omit from predictions and GT overlays.",
+    )
     args = parser.parse_args()
     class_names = [c.strip() for c in args.class_names.split(",") if c.strip()]
+    exclude_classes = {c.strip() for c in args.exclude_classes.split(",") if c.strip()}
+    excluded_class_ids = {
+        idx for idx, name in enumerate(class_names) if name in exclude_classes
+    }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     rgb = load_rgb(args.image)
@@ -77,6 +104,14 @@ def main() -> None:
     predictor = DefaultPredictor(cfg)
     outputs = predictor(bgr)
     instances = outputs["instances"].to("cpu")
+    if excluded_class_ids and len(instances):
+        keep = ~np.isin(instances.pred_classes.numpy(), list(excluded_class_ids))
+        instances = instances[keep]
+
+    exclude_gt_category_ids: set[int] = set()
+    if args.gt_json and args.gt_json.exists() and exclude_classes:
+        gt_coco = json.loads(args.gt_json.read_text())
+        exclude_gt_category_ids = category_ids_by_name(gt_coco, exclude_classes)
 
     visualizer = Visualizer(
         rgb,
@@ -86,7 +121,11 @@ def main() -> None:
     )
     pred_vis = visualizer.draw_instance_predictions(instances).get_image()
 
-    gt_vis = draw_gt(rgb, args.gt_json, args.image.name) if args.gt_json else rgb
+    gt_vis = (
+        draw_gt(rgb, args.gt_json, args.image.name, exclude_gt_category_ids)
+        if args.gt_json
+        else rgb
+    )
     comparison = np.hstack([gt_vis, pred_vis])
     cv2.putText(
         comparison,
@@ -108,11 +147,14 @@ def main() -> None:
     detections = []
     boxes = instances.pred_boxes.tensor.numpy() if len(instances) else np.zeros((0, 4))
     scores = instances.scores.numpy() if len(instances) else np.zeros((0,))
-    for idx, (box, score) in enumerate(zip(boxes, scores), start=1):
+    classes = instances.pred_classes.numpy() if len(instances) else np.zeros((0,), dtype=np.int64)
+    for idx, (box, score, cls_id) in enumerate(zip(boxes, scores, classes), start=1):
         detections.append(
             {
                 "id": idx,
                 "score": float(score),
+                "class_id": int(cls_id),
+                "class_name": class_names[int(cls_id)] if int(cls_id) < len(class_names) else str(cls_id),
                 "bbox": [float(v) for v in box.tolist()],
             }
         )
@@ -122,6 +164,7 @@ def main() -> None:
         "model": str(args.model),
         "device": args.device,
         "score_thresh": args.score_thresh,
+        "excluded_classes": sorted(exclude_classes),
         "num_detections": len(detections),
         "prediction_image": str(pred_path),
         "comparison_image": str(compare_path),

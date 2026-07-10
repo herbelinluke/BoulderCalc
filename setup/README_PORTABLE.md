@@ -113,8 +113,9 @@ Activate the venv first (`call .venv_boulder\Scripts\activate.bat` on Windows).
 ### Step 1 (current) — Build both-years boulder-only COCO from GPKG + tiles
 
 Tiles live under `segmentation/tiling/24/` and `segmentation/tiling/25/`.
-Use the merged annotations GPKG; deposit polygons (`Class=1`) are dropped by
-default. Both ROIs are unioned automatically.
+Defaults load per-year GPKGs (`july9_24input.gpkg` + `july9_25input.gpkg`),
+year-tagged so 24 annotations only label 24 tiles. Deposit polygons (`Class=1`)
+are dropped by default. Both ROIs are unioned unless you pass `--no-roi`.
 
 ```bat
 python BoulderCalculator\scripts\gpkg_to_coco.py ^
@@ -124,14 +125,16 @@ python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --min-area-m2 1.0
 ```
 
-Defaults for `--years 24,25`: `--gpkg july9_input.gpkg`, ROIs =
-`roi_24_0709.gpkg` + `roi.shp`. Single-year: `--years 24` or `--years 25`.
+Optional: `--no-roi` / `--roi none`, or explicit
+`--gpkg path24.gpkg:24,path25.gpkg:25`. Merged `july9_input.gpkg` is still
+accepted (no year tag = apply spatially to any year). Single-year:
+`--years 24` or `--years 25`.
 
 Notes:
 
 - Requires `fiona` (in `requirements-training.txt`).
-- Annotations are reprojected to EPSG:25829, clipped to the ROI union and each
-  tile extent, then converted to pixel coordinates.
+- Annotations are reprojected to EPSG:25829, clipped to the ROI union (if any)
+  and each tile extent, then converted to pixel coordinates.
 - Categories: `1 = Boulder` only when `--boulder-only` (default).
 - Copied tile filenames are year-prefixed (`24_...`, `25_...`) so years never
   collide in one dataset folder.
@@ -314,8 +317,8 @@ The `_1st` / `_2nd` suffix on GeoJSON files is only a version label; the script 
 Files needed on the Windows machine (which already has `segmentation/tiling/`
 and the BoulderCalculator repo):
 
-- `segmentation/annotations/july9_input.gpkg`
-- `segmentation/tile_extents/roi_24_0709.gpkg`
+- `segmentation/annotations/july9_24input.gpkg` and `july9_25input.gpkg`
+- `segmentation/tile_extents/roi_24_0709.gpkg` (optional if using `--no-roi`)
 - `segmentation/tile_extents/roi.shp` + sidecars (`roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg`)
 - `segmentation/tiling/24/` and `segmentation/tiling/25/` if not already present
 - Updated repo code (`git pull`)

@@ -18,6 +18,26 @@ import rasterio
 from pycocotools import mask as mask_utils
 
 
+def filter_coco_annotations(coco: dict, exclude_category_ids: set[int]) -> dict:
+    if not exclude_category_ids:
+        return coco
+    filtered = dict(coco)
+    filtered["annotations"] = [
+        ann for ann in coco.get("annotations", []) if ann.get("category_id") not in exclude_category_ids
+    ]
+    return filtered
+
+
+def category_ids_by_name(coco: dict, exclude_classes: set[str]) -> set[int]:
+    if not exclude_classes:
+        return set()
+    return {
+        cat["id"]
+        for cat in coco.get("categories", [])
+        if cat.get("name") in exclude_classes
+    }
+
+
 def stem_from_pred_path(pred_path: Path) -> str:
     name = pred_path.name
     for suffix in ("_detections.coco.json", "_inference_summary.json"):
@@ -315,10 +335,19 @@ def main() -> None:
         default=None,
         help="Optional tile stems (e.g. 25IniSouthOrt_05_34). Default: all preds in dir.",
     )
+    parser.add_argument(
+        "--exclude-classes",
+        type=str,
+        default="",
+        help="Comma-separated GT category names to omit (e.g. 'BoulderDeposit').",
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     gt_coco = json.loads(args.gt_json.read_text())
+    exclude_classes = {c.strip() for c in args.exclude_classes.split(",") if c.strip()}
+    exclude_category_ids = category_ids_by_name(gt_coco, exclude_classes)
+    gt_coco = filter_coco_annotations(gt_coco, exclude_category_ids)
 
     pred_files = collect_pred_files(args.predictions_dir, args.tiles)
     if not pred_files:
@@ -355,6 +384,7 @@ def main() -> None:
         "gt_json": str(args.gt_json),
         "predictions_dir": str(args.predictions_dir),
         "iou_threshold": args.iou_threshold,
+        "excluded_classes": sorted(exclude_classes),
         "tiles": summaries,
         "totals": {
             "ground_truth": sum(s["ground_truth_count"] for s in summaries),
