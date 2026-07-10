@@ -20,6 +20,8 @@ Files to copy over for the current (both-years boulder-only) training input:
 | `segmentation/tile_extents/roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI (all sidecars required) |
 | `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
 | `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
+| `2024/Sites1and2_2024_DSM_30mm.tif` | Optional: for RGB+DSM 4-band training |
+| `2025/25IniSouthDSM.tif` | Optional: for RGB+DSM 4-band training |
 
 ---
 
@@ -118,6 +120,23 @@ Notes:
   test = 24_12_8, 24_14_15, 24_16_14, 25_04_35, 25_05_34, 25_06_29.
 - Inference uses `--class-names "Boulder"` (single class).
 
+## 2b. Optional — RGB+DSM 4-band training
+
+Stack the year DSM onto each ortho tile (bands R,G,B,DSM) and train with
+`--four-band`. Requires the DSM GeoTIFFs listed above.
+
+```bat
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 24
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 25
+python BoulderCalculator\scripts\build_coco_rgb_dsm.py --source-coco segmentation\coco_dataset_both --tile-dirs segmentation\tiling_rgb_dsm_24 segmentation\tiling_rgb_dsm_25 --output-dir segmentation\coco_dataset_rgb_dsm
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_rgb_dsm --output-dir segmentation\coco_dataset_rgb_dsm_aug --jitter 0.15
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_rgb_dsm_aug --output-dir segmentation\training_run_rgb_dsm --four-band --max-iter 5000 --batch-size 2 --num-workers 4 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_rgb_dsm\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_rgb_dsm\model_final.pth --gt-json segmentation\coco_dataset_rgb_dsm\testing_annotations.json --output-dir segmentation\visualizations\test_inference_rgb_dsm --score-thresh 0.4 --device cuda --four-band --class-names "Boulder"
+```
+
+Pass `--four-band` for both train and inference. Do not mix 3-band and 4-band
+checkpoints/images. See `README_PORTABLE.md` Step 3b for DSM modes and smoke-test flags.
+
 ## 3. Troubleshooting
 
 | Problem | Fix |
@@ -128,3 +147,4 @@ Notes:
 | Out of memory | `--batch-size 1`, or lower `ROI_HEADS.BATCH_SIZE_PER_IMAGE` in the train script |
 | `FileNotFoundError` on tile | Confirm tiles are under `segmentation\tiling\24\` and `25\` with the expected filename patterns |
 | Polygons shifted in QA overlays | Confirm the GPKG CRS is declared correctly (the converter reprojects automatically) |
+| 4-band shape / channel errors | Confirm GeoTIFFs have `count=4` and you passed `--four-band` on train and infer |

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Run a trained Detectron2 model on one tile and save a visualization."""
+"""Run a trained Detectron2 model on one tile and save a visualization.
+
+Supports 3-band RGB (default) or 4-band RGB+DSM tiles via ``--four-band``.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import cv2
@@ -14,6 +18,15 @@ from detectron2 import model_zoo
 from detectron2.config import get_cfg
 from detectron2.engine import DefaultPredictor
 from detectron2.utils.visualizer import ColorMode, Visualizer
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from multiband_io import (  # noqa: E402
+    FOUR_BAND_PIXEL_MEAN,
+    FOUR_BAND_PIXEL_STD,
+    load_bgrd_uint8,
+    load_rgbd_uint8,
+    rgb_preview_from_rgbd,
+)
 
 
 def load_rgb(path: Path) -> np.ndarray:
@@ -78,6 +91,17 @@ def main() -> None:
         default="",
         help="Comma-separated class names to omit from predictions and GT overlays.",
     )
+    parser.add_argument(
+        "--four-band",
+        action="store_true",
+        help="Image is 4-band RGB+DSM; run the model on all 4 channels.",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=2000,
+        help="Detectron2 test resize (should match training; default 2000).",
+    )
     args = parser.parse_args()
     class_names = [c.strip() for c in args.class_names.split(",") if c.strip()]
     exclude_classes = {c.strip() for c in args.exclude_classes.split(",") if c.strip()}
@@ -86,8 +110,14 @@ def main() -> None:
     }
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    rgb = load_rgb(args.image)
-    bgr = rgb[:, :, ::-1]
+
+    if args.four_band:
+        rgbd = load_rgbd_uint8(args.image)
+        rgb = rgb_preview_from_rgbd(rgbd)
+        model_image = load_bgrd_uint8(args.image)
+    else:
+        rgb = load_rgb(args.image)
+        model_image = rgb[:, :, ::-1]
 
     cfg = get_cfg()
     cfg.merge_from_file(
@@ -97,12 +127,16 @@ def main() -> None:
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = len(class_names)
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = args.score_thresh
     cfg.MODEL.DEVICE = args.device
-    cfg.INPUT.MAX_SIZE_TEST = 2000
-    cfg.INPUT.MIN_SIZE_TEST = 2000
+    cfg.INPUT.MAX_SIZE_TEST = args.image_size
+    cfg.INPUT.MIN_SIZE_TEST = args.image_size
+    cfg.INPUT.FORMAT = "BGR"
     cfg.TEST.DETECTIONS_PER_IMAGE = 300
+    if args.four_band:
+        cfg.MODEL.PIXEL_MEAN = FOUR_BAND_PIXEL_MEAN
+        cfg.MODEL.PIXEL_STD = FOUR_BAND_PIXEL_STD
 
     predictor = DefaultPredictor(cfg)
-    outputs = predictor(bgr)
+    outputs = predictor(model_image)
     instances = outputs["instances"].to("cpu")
     if excluded_class_ids and len(instances):
         keep = ~np.isin(instances.pred_classes.numpy(), list(excluded_class_ids))
@@ -163,6 +197,7 @@ def main() -> None:
         "image": str(args.image),
         "model": str(args.model),
         "device": args.device,
+        "four_band": args.four_band,
         "score_thresh": args.score_thresh,
         "excluded_classes": sorted(exclude_classes),
         "num_detections": len(detections),
