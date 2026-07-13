@@ -137,17 +137,120 @@ _DEFAULT_TILES = parse_tiles_used_text(_TILES_USED_TEXT)
 TILES_24 = list(_DEFAULT_TILES[24])
 TILES_25 = list(_DEFAULT_TILES[25])
 
-# Hold-outs spread across old strip + newly annotated western/eastern areas.
-VALID_25 = ["5_33", "8_24", "11_8", "12_10"]
-TEST_25 = ["4_35", "5_34", "6_29", "10_7", "13_8"]
-VALID_24 = ["13_9", "15_15", "8_37", "11_26"]
-TEST_24 = ["12_8", "14_15", "16_14", "5_44", "10_30"]
+# Geographic leakage-safe hold-outs (EPSG:25829 footprint blocks along the coast).
+# Built so no train/valid/test pair shares overlapping ground (incl. cross-year).
+# EXCLUDED_* tiles abut hold-outs and are dropped from every split (spatial buffer).
+# Blocks: 12 segments along the coast PCA axis; valid={2,8}, test={5,11}.
+VALID_24 = [
+    "3_36",
+    "7_38",
+    "7_39",
+    "8_37",
+    "8_38",
+    "8_39",
+    "14_17",
+    "14_18",
+    "14_19",
+    "14_20",
+    "15_17",
+    "15_18",
+    "15_19",
+    "15_20",
+    "16_17",
+]
+TEST_24 = [
+    "10_5",
+    "10_6",
+    "10_7",
+    "10_28",
+    "10_29",
+    "11_5",
+    "11_6",
+    "11_7",
+    "11_27",
+    "11_28",
+    "11_29",
+    "12_7",
+    "12_8",
+    "12_27",
+    "12_28",
+    "13_7",
+    "13_8",
+    "13_9",
+    "14_7",
+    "14_8",
+    "14_9",
+    "15_7",
+    "15_8",
+    "15_9",
+    "16_7",
+    "16_8",
+    "16_9",
+]
+EXCLUDED_24 = [
+    "8_36",
+    "9_36",
+    "11_26",
+    "12_9",
+    "12_26",
+    "13_10",
+    "14_10",
+    "14_16",
+    "15_10",
+    "15_16",
+    "16_10",
+    "16_16",
+]
+VALID_25 = [
+    "4_33",
+    "5_31",
+    "5_32",
+    "5_33",
+    "6_31",
+    "11_13",
+    "11_14",
+    "11_15",
+    "12_13",
+    "12_14",
+    "12_15",
+    "12_16",
+]
+TEST_25 = [
+    "7_24",
+    "8_22",
+    "8_23",
+    "8_24",
+    "9_22",
+    "9_23",
+    "9_24",
+    "9_25",
+    "10_5",
+    "11_5",
+    "11_6",
+    "12_5",
+    "12_6",
+    "13_5",
+    "13_6",
+]
+EXCLUDED_25 = [
+    "4_34",
+    "5_34",
+    "7_25",
+    "8_25",
+    "10_6",
+    "11_16",
+    "13_13",
+]
 
 # Back-compat aliases used by build_rgb_dsm_tiles.py
 ALL_TILES = TILES_25
 VALID_TILES = VALID_25
 TEST_TILES = TEST_25
-TRAIN_TILES = [k for k in ALL_TILES if k not in VALID_TILES + TEST_TILES]
+TRAIN_TILES = [
+    k
+    for k in ALL_TILES
+    if k not in VALID_TILES + TEST_TILES + EXCLUDED_25
+]
 
 
 def normalize_key(key: str) -> tuple[int, int]:
@@ -202,19 +305,31 @@ def expand_year_keys(
     years: list[int],
     tiles_by_year: dict[int, list[str]] | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
-    """Return (train, valid, test) year-prefixed keys for the given years."""
+    """Return (train, valid, test) year-prefixed keys for the given years.
+
+    Hold-outs are geographic blocks shared across years (no footprint overlap
+    between train/valid/test). EXCLUDED_* tiles are omitted from every split.
+    """
     train, valid, test = [], [], []
     for year in years:
         tiles = tiles_for_year(year, tiles_by_year)
         valid_set = {canonical_key(k) for k in (VALID_24 if year == 24 else VALID_25)}
         test_set = {canonical_key(k) for k in (TEST_24 if year == 24 else TEST_25)}
+        excluded_set = {
+            canonical_key(k) for k in (EXCLUDED_24 if year == 24 else EXCLUDED_25)
+        }
         missing_holdouts = sorted((valid_set | test_set) - set(tiles))
         if missing_holdouts:
             raise ValueError(
                 f"Hold-out tiles not in year {year} tile list: {missing_holdouts}. "
                 "Update VALID_*/TEST_* or tiles_used.txt."
             )
+        overlap_holdouts = sorted(valid_set & test_set)
+        if overlap_holdouts:
+            raise ValueError(f"Tile(s) listed in both valid and test for {year}: {overlap_holdouts}")
         for key in tiles:
+            if key in excluded_set:
+                continue
             yk = year_key(year, key)
             if key in valid_set:
                 valid.append(yk)
@@ -222,7 +337,58 @@ def expand_year_keys(
                 test.append(yk)
             else:
                 train.append(yk)
+    # ID-level leakage guard
+    s_train, s_valid, s_test = set(train), set(valid), set(test)
+    if s_train & s_valid or s_train & s_test or s_valid & s_test:
+        raise ValueError(
+            "Split leakage: duplicate year-prefixed tile IDs across train/valid/test"
+        )
     return train, valid, test
+
+
+def footprint_overlaps(a: tuple[float, float, float, float], b: tuple[float, float, float, float], min_area: float = 1.0) -> bool:
+    """Axis-aligned bounds overlap with area >= min_area (map units^2)."""
+    ix0 = max(a[0], b[0])
+    iy0 = max(a[1], b[1])
+    ix1 = min(a[2], b[2])
+    iy1 = min(a[3], b[3])
+    return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0) >= min_area
+
+
+def assert_no_geographic_leakage(
+    tile_dir: Path,
+    train: list[str],
+    valid: list[str],
+    test: list[str],
+) -> None:
+    """Raise if any train/valid/test pair shares overlapping GeoTIFF footprints."""
+    import rasterio
+
+    def bounds(yk: str) -> tuple[float, float, float, float]:
+        with rasterio.open(resolve_tile_path(tile_dir, yk)) as ds:
+            b = ds.bounds
+            return (b.left, b.bottom, b.right, b.top)
+
+    cache = {yk: bounds(yk) for yk in train + valid + test}
+
+    def check(name_a: str, keys_a: list[str], name_b: str, keys_b: list[str]) -> None:
+        hits = []
+        for a in keys_a:
+            ba = cache[a]
+            for b in keys_b:
+                if footprint_overlaps(ba, cache[b]):
+                    hits.append((a, b))
+        if hits:
+            sample = ", ".join(f"{a}∩{b}" for a, b in hits[:8])
+            more = f" (+{len(hits) - 8} more)" if len(hits) > 8 else ""
+            raise ValueError(
+                f"Geographic leakage between {name_a} and {name_b}: "
+                f"{len(hits)} overlapping tile pair(s). e.g. {sample}{more}"
+            )
+
+    check("train", train, "valid", valid)
+    check("train", train, "test", test)
+    check("valid", valid, "test", test)
 
 
 def resolve_tile_path(tile_dir: Path, key: str, year: int | None = None) -> Path:
@@ -830,8 +996,29 @@ def main() -> None:
 
     tiles_by_year = resolve_tiles_by_year(seg_dir, args.tiles_used)
     train_default, valid_default, test_default = expand_year_keys(years, tiles_by_year)
+    n_excluded = sum(
+        len(EXCLUDED_24 if y == 24 else EXCLUDED_25)
+        for y in years
+    )
+    print(
+        f"Splits: train={len(train_default)} valid={len(valid_default)} "
+        f"test={len(test_default)} excluded_buffer={n_excluded}"
+    )
+    print(
+        "Hold-outs: valid="
+        + ",".join(valid_default)
+        + " test="
+        + ",".join(test_default)
+    )
+    # Verify no cross-year (or within-year) footprint overlap between splits.
+    try:
+        assert_no_geographic_leakage(
+            tile_dir, train_default, valid_default, test_default
+        )
+        print("Geographic leakage check: OK (no overlapping footprints across splits)")
+    except FileNotFoundError as exc:
+        print(f"Geographic leakage check skipped (missing tile): {exc}")
 
-    # ROI clipping is off by default. Only enable when --roi lists real paths.
     if (
         args.no_roi
         or args.roi is None
@@ -862,12 +1049,6 @@ def main() -> None:
         f"({n_boulder} Boulder, {n_deposit} BoulderDeposit) [{mode}]"
     )
     print(f"Years: {years}")
-    print(
-        "Hold-outs: valid="
-        + ",".join(valid_default)
-        + " test="
-        + ",".join(test_default)
-    )
 
     train_tiles = parse_tile_list(args.train_tiles, train_default)
     valid_tiles = parse_tile_list(args.valid_tiles, valid_default)
