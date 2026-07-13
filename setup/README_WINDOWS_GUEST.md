@@ -140,7 +140,7 @@ python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentatio
 :: 3. GT QA overlays
 python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
 
-:: 4. Train (~181 train tiles x 8 aug ~= 1448 images -> raise max-iter)
+:: 4. Train (~111 train tiles x 8 aug ~= 888 images -> raise max-iter)
 python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 10000 --batch-size 2 --num-workers 2 --device cuda
 
 :: 5. Inference (filenames are year-prefixed)

@@ -136,9 +136,7 @@ Notes:
 - Categories: `1 = Boulder` only when `--boulder-only` (default).
 - Copied tile filenames are year-prefixed (`24_...`, `25_...`) so years never
   collide in one dataset folder.
-- Splits (~199 tiles from `tiles_used.txt`): ~181 train / 8 valid / 10 test.
-  Hold-outs span both years (valid includes 24_08_37, 24_11_26, 24_13_09,
-  24_15_15, 25_05_33, 25_08_24, 25_11_08, 25_12_10).
+- Splits (~199 annotated tiles): ~111 train / 27 valid / 42 test, plus ~19 excluded as a spatial buffer. Hold-outs are geographic blocks so 2024/2025 overlapping footprints never cross train↔valid/test (or valid↔test).
 
 `train_boulder_local.py` reads class names from the dataset JSON automatically.
 For inference pass `--class-names "Boulder"`.

@@ -98,7 +98,7 @@ python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentatio
 :: Step 3 - visual QA
 python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
 
-:: Step 4 - train (scale iters with image count; ~181 train tiles x 8 aug ~= 1448 images -> raise max-iter)
+:: Step 4 - train (scale iters with image count; ~111 train tiles x 8 aug ~= 888 images -> raise max-iter)
 python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 10000 --batch-size 2 --num-workers 4 --device cuda
 
 :: Step 5 - inference (filenames are year-prefixed in the COCO dataset)
@@ -113,8 +113,7 @@ Notes:
   (pass `--roi path` to enable). Single-year: `--years 24` or `--years 25`.
 - Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
   two years never collide in one dataset folder.
-- Hold-outs (~8 valid / 10 test) span both years, including new western/eastern
-  coverage (e.g. valid 24_08_37, 24_11_26, 25_11_08, 25_12_10).
+- Hold-outs are geographic blocks (~27 valid / 42 test) with a buffer of excluded tiles so footprints do not leak across train/valid/test (including cross-year overlaps).
 - Inference uses `--class-names "Boulder"` (single class).
 
 ## 3. Troubleshooting
