@@ -48,11 +48,11 @@ boulder_project/
 | `BoulderCalculator/scripts/` | Pipeline scripts |
 | `setup/requirements-training.txt` + setup script | Environment |
 
-They do **not** need QGIS project files. Optional ROI files live under `tile_extents/`.
+They do **not** need QGIS project files or ROI files (ROI clipping is off by default).
 
 | Optional | What it is |
 |----------|------------|
-| `tile_extents/roi*.gpkg` / `roi.shp` | ROI clipping (skip with `--no-roi`) |
+| `tile_extents/roi*.gpkg` / `roi.shp` | Optional ROI clipping (off by default; pass `--roi`) |
 | `*.gpkg-wal` / `*.gpkg-shm` | SQLite journal temp files — ignore |
 
 ---
@@ -113,7 +113,7 @@ Tiles live under `segmentation/tiling/24/` and `segmentation/tiling/25/`.
 Defaults load per-year GPKGs (`july13_24.gpkg` + `july13_25.gpkg`) and tile lists from
 `annotations/tiles_used.txt` (~109 / 2024 + ~90 / 2025),
 year-tagged so 24 annotations only label 24 tiles. Deposit polygons (`Class=1`)
-are dropped by default. Both ROIs are unioned unless you pass `--no-roi`.
+are dropped by default. ROI clipping is off by default (pass `--roi path` to enable).
 
 ```bat
 python BoulderCalculator\scripts\gpkg_to_coco.py ^
@@ -123,8 +123,7 @@ python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --min-area-m2 1.0
 ```
 
-Optional: `--no-roi` / `--roi none`, or explicit
-`--gpkg path24.gpkg:24,path25.gpkg:25`. Legacy merged `july9_input.gpkg` is
+Optional: `--gpkg path24.gpkg:24,path25.gpkg:25`, or `--roi path.shp` to re-enable ROI clipping. Legacy merged `july9_input.gpkg` is
 still accepted if July 13 files are absent (no year tag = apply spatially to
 any year). Single-year: `--years 24` or `--years 25`. Override the tile list
 with `--tiles-used path\to\tiles_used.txt`.
@@ -175,7 +174,6 @@ python BoulderCalculator\scripts\gpkg_to_coco.py ^
   --years 25 ^
   --no-boulder-only ^
   --gpkg segmentation\annotations\july13_25.gpkg ^
-  --roi segmentation\tile_extents\roi.shp ^
   --output-dir segmentation\coco_dataset_25
 ```
 
@@ -288,8 +286,6 @@ and the BoulderCalculator repo):
 
 - `segmentation/annotations/july13_24.gpkg` and `july13_25.gpkg`
 - `segmentation/annotations/tiles_used.txt`
-- `segmentation/tile_extents/roi_24_0709.gpkg` (optional if using `--no-roi`)
-- `segmentation/tile_extents/roi.shp` + sidecars (`roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg`)
 - `segmentation/tiling/24/` and `segmentation/tiling/25/` if not already present
 - Updated repo code (`git pull`)
 - `pip install fiona` into the existing venv (or re-run the requirements install)
@@ -325,7 +321,7 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 | Script | Purpose |
 |--------|---------|
-| `gpkg_to_coco.py` | GPKG + ROI (.shp/.gpkg) + `tiles_used.txt` → COCO (boulder-only or two-class) |
+| `gpkg_to_coco.py` | GPKG + `tiles_used.txt` → COCO (boulder-only or two-class; ROI optional) |
 | `augment_coco_dataset.py` | Offline train-split augmentation (flips/rotations/jitter) |
 | `visualize_coco_annotations.py` | Ground-truth polygon QA images |
 | `train_boulder_local.py` | Fine-tune Mask R-CNN |
