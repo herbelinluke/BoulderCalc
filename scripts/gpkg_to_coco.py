@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Convert a QGIS GPKG annotation layer + GeoTIFF tiles into Detectron2 COCO JSON.
 
-Supports year-based tile layouts under segmentation/tiling/{24,25}/, ROI as
-shapefile or GeoPackage (one or many, unioned), multi-year training in one
-dataset, and boulder-only mode (deposit polygons dropped).
+Supports year-based tile layouts under segmentation/tiling/{24,25}/, optional
+ROI clipping, multi-year training in one dataset, and boulder-only mode
+(deposit polygons dropped).
 
 Annotation GPKGs can be year-tagged so each year's polygons only label that
 year's tiles (important if footprints ever overlap):
@@ -26,7 +26,8 @@ Example (both years, per-year GPKGs, boulder-only):
         --output-dir segmentation/coco_dataset_both \\
         --min-area-m2 1.0
 
-Skip ROI clipping with ``--roi none`` or ``--no-roi``.
+ROI clipping is off by default. Pass ``--roi path.shp`` (or multiple
+comma-separated paths) only if you want to re-enable it.
 """
 
 from __future__ import annotations
@@ -772,14 +773,15 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Comma-separated ROI .shp/.gpkg paths (default: year ROIs unioned). "
-            "Pass 'none' to disable ROI clipping."
+            "Optional comma-separated ROI .shp/.gpkg paths to clip annotations. "
+            "ROI clipping is off by default; pass paths here to enable it, or "
+            "'none' / --no-roi to keep it disabled."
         ),
     )
     parser.add_argument(
         "--no-roi",
         action="store_true",
-        help="Disable ROI clipping (same as --roi none).",
+        help="Disable ROI clipping (default behavior; kept for backward compatibility).",
     )
     parser.add_argument(
         "--tiles-used",
@@ -829,23 +831,20 @@ def main() -> None:
     tiles_by_year = resolve_tiles_by_year(seg_dir, args.tiles_used)
     train_default, valid_default, test_default = expand_year_keys(years, tiles_by_year)
 
-    if args.no_roi or (args.roi is not None and str(args.roi).lower() == "none"):
+    # ROI clipping is off by default. Only enable when --roi lists real paths.
+    if (
+        args.no_roi
+        or args.roi is None
+        or str(args.roi).lower() == "none"
+    ):
         roi_paths: list[Path] = []
     else:
-        roi_paths_opt = parse_path_list(args.roi)
-        if roi_paths_opt is None:
-            defaults = default_roi_paths(years, seg_dir)
-            roi_paths = [p for p in defaults if p.exists()]
-            for p in defaults:
-                if not p.exists():
-                    print(f"ROI default missing ({p}); skipping")
-        else:
-            roi_paths = roi_paths_opt
+        roi_paths = parse_path_list(args.roi) or []
     if roi_paths:
         roi = load_rois(roi_paths)
     else:
         roi = None
-        print("ROI: none")
+        print("ROI: none (clipping disabled)")
 
     feats: list[tuple] = []
     for path, year in gpkg_specs:

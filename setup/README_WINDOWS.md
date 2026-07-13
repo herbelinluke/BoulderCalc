@@ -17,8 +17,6 @@ Files to copy over for the current (both-years boulder-only) training input:
 | `segmentation/annotations/july13_25.gpkg` | 2025 annotations (preferred) |
 | `segmentation/annotations/tiles_used.txt` | Annotated tile ranges (source of truth) |
 | `segmentation/annotations/july9_input.gpkg` | Legacy merged fallback if July 13 files are absent |
-| `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI (omit / use `--no-roi` to skip) |
-| `segmentation/tile_extents/roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI (all sidecars required) |
 | `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
 | `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
 | `2024/Sites1and2_2024_DSM_30mm.tif` | Optional: for RGB+DSM 4-band training |
@@ -87,13 +85,13 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 Run from the project root. Tiles live under `segmentation\tiling\24\` and
 `segmentation\tiling\25\`. One conversion pass loads year-tagged GPKGs (24
-polys only label 24 tiles) and optionally unions both ROIs.
+polys only label 24 tiles). ROI clipping is off by default.
 
 ```bat
-:: Step 1 - per-year GPKGs + both ROIs + tiles_used.txt -> 1-class COCO (~199 tiles).
+:: Step 1 - per-year GPKGs + tiles_used.txt -> 1-class COCO (~199 tiles).
 ::   --years 24,25 is the default. --boulder-only (default) drops deposits.
 ::   Defaults: july13_24.gpkg:24 + july13_25.gpkg:25 when present.
-::   Skip ROI: add --no-roi   Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
+::   ROI off by default; pass --roi path to enable. Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
 :: Step 2 - offline augmentation (8x train split)
@@ -113,9 +111,8 @@ Notes:
 
 - Defaults for `--years 24,25`: per-year GPKGs `july13_24.gpkg` +
   `july13_25.gpkg` (year-tagged; fall back to merged `july9_input.gpkg`),
-  tile list from `annotations/tiles_used.txt`, ROIs = `roi_24_0709.gpkg` +
-  `roi.shp` (unioned). Use `--no-roi` / `--roi none` to disable ROI.
-  Single-year: `--years 24` or `--years 25`.
+  tile list from `annotations/tiles_used.txt`. ROI clipping is off by default
+  (pass `--roi path` to enable). Single-year: `--years 24` or `--years 25`.
 - Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
   two years never collide in one dataset folder.
 - Hold-outs (~8 valid / 10 test) span both years, including new western/eastern
