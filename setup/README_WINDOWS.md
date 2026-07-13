@@ -13,13 +13,14 @@ Files to copy over for the current (both-years boulder-only) training input:
 
 | File | Purpose |
 |------|---------|
-| `segmentation/annotations/july9_24input.gpkg` | 2024 annotations (preferred) |
-| `segmentation/annotations/july9_25input.gpkg` | 2025 annotations (preferred) |
-| `segmentation/annotations/july9_input.gpkg` | Optional merged fallback if per-year files are absent |
+| `segmentation/annotations/july13_24.gpkg` | 2024 annotations (preferred) |
+| `segmentation/annotations/july13_25.gpkg` | 2025 annotations (preferred) |
+| `segmentation/annotations/july9_input.gpkg` | Legacy merged fallback if July 13 files are absent |
 | `segmentation/tile_extents/roi_24_0709.gpkg` | 2024 ROI (omit / use `--no-roi` to skip) |
 | `segmentation/tile_extents/roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI (all sidecars required) |
 | `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
 | `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
+| `segmentation/annotations/tiles_used.txt` | Annotated tile ranges (source of truth) |
 
 ---
 
@@ -87,9 +88,9 @@ Run from the project root. Tiles live under `segmentation\tiling\24\` and
 polys only label 24 tiles) and optionally unions both ROIs.
 
 ```bat
-:: Step 1 - per-year GPKGs + both ROIs + 24/25 tiles -> 1-class COCO (~99 tiles).
+:: Step 1 - per-year GPKGs + both ROIs + 24/25 tiles -> 1-class COCO (~199 tiles).
 ::   --years 24,25 is the default. --boulder-only (default) drops deposits.
-::   Defaults: july9_24input.gpkg:24 + july9_25input.gpkg:25 when present.
+::   Defaults: july13_24.gpkg:24 + july13_25.gpkg:25 when present.
 ::   Skip ROI: add --no-roi   Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
@@ -99,8 +100,8 @@ python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentatio
 :: Step 3 - visual QA
 python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
 
-:: Step 4 - train (scale iters with image count; ~89 train tiles x 8 aug ~= 712 images -> ~5000 iters at batch 2)
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 5000 --batch-size 2 --num-workers 4 --device cuda
+:: Step 4 - train (scale iters with image count; ~181 train tiles x 8 aug ~= 1448 images -> raise max-iter)
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 10000 --batch-size 2 --num-workers 4 --device cuda
 
 :: Step 5 - inference (filenames are year-prefixed in the COCO dataset)
 python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_both\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_both\model_final.pth --gt-json segmentation\coco_dataset_both\testing_annotations.json --output-dir segmentation\visualizations\test_inference_both --score-thresh 0.4 --device cuda --class-names "Boulder"
@@ -108,14 +109,15 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 Notes:
 
-- Defaults for `--years 24,25`: per-year GPKGs `july9_24input.gpkg` +
-  `july9_25input.gpkg` (year-tagged; fall back to merged `july9_input.gpkg`),
-  ROIs = `roi_24_0709.gpkg` + `roi.shp` (unioned). Use `--no-roi` / `--roi none`
-  to disable ROI. Single-year: `--years 24` or `--years 25`.
+- Defaults for `--years 24,25`: per-year GPKGs `july13_24.gpkg` +
+  `july13_25.gpkg` (year-tagged; fall back to merged `july9_input.gpkg`),
+  tile list from `annotations/tiles_used.txt`, ROIs = `roi_24_0709.gpkg` +
+  `roi.shp` (unioned). Use `--no-roi` / `--roi none` to disable ROI.
+  Single-year: `--years 24` or `--years 25`.
 - Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
   two years never collide in one dataset folder.
-- Hold-outs include both years: valid = 24_13_9, 24_15_15, 25_05_33, 25_08_24;
-  test = 24_12_8, 24_14_15, 24_16_14, 25_04_35, 25_05_34, 25_06_29.
+- Hold-outs (~8 valid / 10 test) span both years, including new western/eastern
+  coverage (e.g. valid 24_08_37, 24_11_26, 25_11_08, 25_12_10).
 - Inference uses `--class-names "Boulder"` (single class).
 
 ## 3. Troubleshooting

@@ -121,17 +121,18 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 | File | Purpose |
 |------|---------|
-| `segmentation\annotations\july9_24input.gpkg` | 2024 annotations |
-| `segmentation\annotations\july9_25input.gpkg` | 2025 annotations |
+| `segmentation\annotations\july13_24.gpkg` | 2024 annotations |
+| `segmentation\annotations\july13_25.gpkg` | 2025 annotations |
 | `segmentation\tile_extents\roi_24_0709.gpkg` | 2024 ROI (optional; `--no-roi` skips) |
 | `segmentation\tile_extents\roi.shp` + `roi.shx`, `roi.dbf`, `roi.prj`, `roi.cpg` | 2025 ROI |
 | `segmentation\tiling\24\*.tif` | 2024 ortho tiles |
 | `segmentation\tiling\25\*.tif` | 2025 ortho tiles |
+| `segmentation\annotations\tiles_used.txt` | Annotated tile ranges (source of truth) |
 
 ## 5. Workflow (from `B:\`) — both years, boulder-only
 
 ```bat
-:: 1. Per-year GPKGs (year-tagged) + both ROIs + 24/25 tiles -> 1-class COCO
+:: 1. Per-year GPKGs (year-tagged) + both ROIs + tiles_used.txt -> 1-class COCO
 ::    Add --no-roi to skip ROI clipping.
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
@@ -141,8 +142,8 @@ python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentatio
 :: 3. GT QA overlays
 python BoulderCalculator\scripts\visualize_coco_annotations.py --dataset-dir segmentation\coco_dataset_both --output-dir segmentation\visualizations\coco_gt_both
 
-:: 4. Train (~89 train tiles x 8 aug ~= 712 images -> ~5000 iters at batch 2)
-python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 5000 --batch-size 2 --num-workers 2 --device cuda
+:: 4. Train (~181 train tiles x 8 aug ~= 1448 images -> raise max-iter)
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_both_aug --output-dir segmentation\training_run_both --max-iter 10000 --batch-size 2 --num-workers 2 --device cuda
 
 :: 5. Inference (filenames are year-prefixed)
 python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_both\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_both\model_final.pth --gt-json segmentation\coco_dataset_both\testing_annotations.json --output-dir segmentation\visualizations\test_inference_both --score-thresh 0.4 --device cuda --class-names "Boulder"
