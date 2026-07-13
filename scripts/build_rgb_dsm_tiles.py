@@ -23,16 +23,56 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
+from rasterio.warp import reproject, Resampling
+from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_hillshade_tiles import (  # noqa: E402
-    compute_local_relief,
-    fill_dem,
-    relief_to_uint8,
-    warp_dem_to_tile,
-)
 from gpkg_to_coco import TILES_24, TILES_25, resolve_tile_path, tile_filename  # noqa: E402
+
+
+def fill_dem(dem: np.ndarray) -> np.ndarray:
+    dem = dem.astype(np.float32)
+    if not np.any(np.isfinite(dem)):
+        return np.zeros_like(dem, dtype=np.float32)
+    fill = float(np.nanmedian(dem[np.isfinite(dem)]))
+    return np.where(np.isfinite(dem), dem, fill)
+
+
+def compute_local_relief(
+    dem: np.ndarray,
+    pixel_size: float,
+    radius_m: float = 10.0,
+) -> np.ndarray:
+    dem = fill_dem(dem)
+    sigma_px = max(1.0, radius_m / pixel_size)
+    smooth = gaussian_filter(dem, sigma=sigma_px)
+    return dem - smooth
+
+
+def relief_to_uint8(relief: np.ndarray) -> np.ndarray:
+    finite = relief[np.isfinite(relief)]
+    if finite.size == 0:
+        return np.zeros(relief.shape, dtype=np.uint8)
+    lo, hi = np.percentile(finite, [2, 98])
+    scaled = (relief - lo) / max(hi - lo, 1e-6)
+    return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
+
+
+def warp_dem_to_tile(ortho_path: Path, dsm_path: Path) -> tuple[np.ndarray, rasterio.profiles.Profile]:
+    with rasterio.open(ortho_path) as ortho:
+        dem = np.zeros((ortho.height, ortho.width), dtype=np.float32)
+        with rasterio.open(dsm_path) as dsm:
+            reproject(
+                source=rasterio.band(dsm, 1),
+                destination=dem,
+                src_transform=dsm.transform,
+                src_crs=dsm.crs,
+                dst_transform=ortho.transform,
+                dst_crs=ortho.crs,
+                resampling=Resampling.bilinear,
+            )
+        return dem, ortho.profile.copy()
 
 
 def elevation_to_uint8(dem: np.ndarray) -> np.ndarray:

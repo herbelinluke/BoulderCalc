@@ -8,7 +8,10 @@ dataset, and boulder-only mode (deposit polygons dropped).
 Annotation GPKGs can be year-tagged so each year's polygons only label that
 year's tiles (important if footprints ever overlap):
 
-  --gpkg july9_24input.gpkg:24,july9_25input.gpkg:25
+  --gpkg july13_24.gpkg:24,july13_25.gpkg:25
+
+Tile lists default from ``segmentation/annotations/tiles_used.txt`` (or the
+baked-in copy of that file). Override with ``--tiles-used``.
 
 Class attribute handling:
   - numeric 0 / missing / string "Boulder"  -> Boulder (COCO category 1)
@@ -19,7 +22,7 @@ Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
         --segmentation-dir segmentation \\
         --years 24,25 \\
-        --gpkg segmentation/annotations/july9_24input.gpkg:24,segmentation/annotations/july9_25input.gpkg:25 \\
+        --gpkg segmentation/annotations/july13_24.gpkg:24,segmentation/annotations/july13_25.gpkg:25 \\
         --output-dir segmentation/coco_dataset_both \\
         --min-area-m2 1.0
 
@@ -49,35 +52,97 @@ CATEGORIES_ONE = [
     {"id": 1, "name": "Boulder", "supercategory": "none"},
 ]
 
-# 2025 tiles (legacy v3 list). Keys are "RR_CC" without year prefix.
-TILES_25 = (
-    [f"11_{c}" for c in range(17, 19)]
-    + [f"10_{c}" for c in range(17, 22)]
-    + [f"09_{c}" for c in range(18, 26)]
-    + [f"08_{c}" for c in range(20, 28)]
-    + [f"07_{c}" for c in range(24, 30)]
-    + [f"06_{c}" for c in range(27, 32)]
-    + [f"05_{c}" for c in range(30, 36)]
-    + [f"04_{c}" for c in range(33, 39)]
-    + [f"03_{c}" for c in range(36, 39)]
-)
-VALID_25 = ["05_33", "08_24"]
-TEST_25 = ["04_35", "05_34", "06_29"]
+# Snapshot of segmentation/annotations/tiles_used.txt (2026-07-13).
+# Keys are "R_C" (no zero-padding). Prefer --tiles-used when the file is present.
+_TILES_USED_TEXT = """\
+2025 tiles annotated:
+3:35-38
+4:33-38
+5:30-35
+6:27-31
+7:24-29
+8:20-27
+9:18-25
+10:5-9, 16-21
+11:5-18
+12:5-17
+13:5-13
 
-# 2024 tiles: 11:7, 12:7-9, 13:7-13, 14:7-20, 15:7-20, 16:7-17
-TILES_24 = (
-    [f"11_{c}" for c in [7]]
-    + [f"12_{c}" for c in range(7, 10)]
-    + [f"13_{c}" for c in range(7, 14)]
-    + [f"14_{c}" for c in range(7, 21)]
-    + [f"15_{c}" for c in range(7, 21)]
-    + [f"16_{c}" for c in range(7, 18)]
-)
-# Hold-out tiles with annotations, spread across the 2024 strip.
-VALID_24 = ["13_9", "15_15"]
-TEST_24 = ["12_8", "14_15", "16_14"]
+2024 tiles annotated:
+3:36
+4:44-46
+5:42-46
+6:40-45
+7:38-43
+8:35-40
+9:32-36
+10:5-7, 28-32
+11:5-7, 24-29
+12:7-9, 23-28
+13:7-13, 21-23
+14:7-22
+15:7-20
+16:7-17
+"""
 
-# Back-compat aliases used by build_hillshade_tiles.py
+
+def parse_col_spec(spec: str) -> list[int]:
+    """Parse '5-9, 16-21' or '36' into a list of column indices."""
+    cols: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cols.extend(range(int(lo), int(hi) + 1))
+        else:
+            cols.append(int(part))
+    return cols
+
+
+def parse_tiles_used_text(text: str) -> dict[int, list[str]]:
+    """Parse tiles_used.txt into {24: ['3_36', ...], 25: [...]}."""
+    by_year: dict[int, list[str]] = {24: [], 25: []}
+    year: int | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if "2025" in low and "tile" in low:
+            year = 25
+            continue
+        if "2024" in low and "tile" in low:
+            year = 24
+            continue
+        if year is None or ":" not in line:
+            continue
+        row_s, cols_s = line.split(":", 1)
+        row = int(row_s.strip())
+        for col in parse_col_spec(cols_s):
+            by_year[year].append(f"{row}_{col}")
+    return by_year
+
+
+def load_tiles_used(path: Path) -> dict[int, list[str]]:
+    data = parse_tiles_used_text(path.read_text())
+    if not data.get(24) or not data.get(25):
+        raise ValueError(f"{path} must define both 2024 and 2025 tile ranges")
+    return data
+
+
+_DEFAULT_TILES = parse_tiles_used_text(_TILES_USED_TEXT)
+TILES_24 = list(_DEFAULT_TILES[24])
+TILES_25 = list(_DEFAULT_TILES[25])
+
+# Hold-outs spread across old strip + newly annotated western/eastern areas.
+VALID_25 = ["5_33", "8_24", "11_8", "12_10"]
+TEST_25 = ["4_35", "5_34", "6_29", "10_7", "13_8"]
+VALID_24 = ["13_9", "15_15", "8_37", "11_26"]
+TEST_24 = ["12_8", "14_15", "16_14", "5_44", "10_30"]
+
+# Back-compat aliases used by build_rgb_dsm_tiles.py
 ALL_TILES = TILES_25
 VALID_TILES = VALID_25
 TEST_TILES = TEST_25
@@ -94,6 +159,15 @@ def normalize_key(key: str) -> tuple[int, int]:
     return int(parts[0]), int(parts[1])
 
 
+def tile_key(row: int, col: int) -> str:
+    return f"{row}_{col}"
+
+
+def canonical_key(key: str) -> str:
+    row, col = normalize_key(key)
+    return tile_key(row, col)
+
+
 def tile_filename(key: str, year: int = 25) -> str:
     row, col = normalize_key(key)
     if year == 24:
@@ -105,11 +179,11 @@ def parse_year_key(key: str, default_year: int | None = None) -> tuple[int, str]
     """Parse '14_15' or '24_14_15' into (year, '14_15')."""
     parts = key.strip().split("_")
     if len(parts) == 3 and parts[0] in ("24", "25"):
-        return int(parts[0]), f"{int(parts[1])}_{int(parts[2])}"
+        return int(parts[0]), tile_key(int(parts[1]), int(parts[2]))
     if len(parts) == 2:
         if default_year is None:
             raise ValueError(f"Tile key {key!r} needs a year prefix (e.g. 24_14_15) or --year")
-        return default_year, f"{int(parts[0])}_{int(parts[1])}"
+        return default_year, tile_key(int(parts[0]), int(parts[1]))
     raise ValueError(f"Bad tile key: {key}")
 
 
@@ -118,13 +192,27 @@ def year_key(year: int, key: str) -> str:
     return f"{year}_{row:02d}_{col:02d}"
 
 
-def expand_year_keys(years: list[int]) -> tuple[list[str], list[str], list[str]]:
+def tiles_for_year(year: int, tiles_by_year: dict[int, list[str]] | None = None) -> list[str]:
+    source = tiles_by_year or {24: TILES_24, 25: TILES_25}
+    return [canonical_key(k) for k in source[year]]
+
+
+def expand_year_keys(
+    years: list[int],
+    tiles_by_year: dict[int, list[str]] | None = None,
+) -> tuple[list[str], list[str], list[str]]:
     """Return (train, valid, test) year-prefixed keys for the given years."""
     train, valid, test = [], [], []
     for year in years:
-        tiles = TILES_24 if year == 24 else TILES_25
-        valid_set = set(VALID_24 if year == 24 else VALID_25)
-        test_set = set(TEST_24 if year == 24 else TEST_25)
+        tiles = tiles_for_year(year, tiles_by_year)
+        valid_set = {canonical_key(k) for k in (VALID_24 if year == 24 else VALID_25)}
+        test_set = {canonical_key(k) for k in (TEST_24 if year == 24 else TEST_25)}
+        missing_holdouts = sorted((valid_set | test_set) - set(tiles))
+        if missing_holdouts:
+            raise ValueError(
+                f"Hold-out tiles not in year {year} tile list: {missing_holdouts}. "
+                "Update VALID_*/TEST_* or tiles_used.txt."
+            )
         for key in tiles:
             yk = year_key(year, key)
             if key in valid_set:
@@ -236,7 +324,7 @@ def infer_year_from_path(path: Path) -> int | None:
         return 24
     if "25" in name and "24" not in name:
         return 25
-    # Common patterns: july9_24input, roi_24, ...
+    # Common patterns: july13_24, july9_24input, roi_24, ...
     for token in name.replace(".", "_").replace("-", "_").split("_"):
         if token == "24":
             return 24
@@ -577,13 +665,21 @@ def parse_path_list(value: str | None) -> list[Path] | None:
 
 
 def default_gpkg_specs(years: list[int], seg_dir: Path) -> list[tuple[Path, int | None]]:
-    """Prefer per-year GPKGs (year-tagged); fall back to merged july9_input.gpkg."""
+    """Prefer per-year July 13 GPKGs (year-tagged); fall back to july9 names."""
     ann = seg_dir / "annotations"
+    july13 = [
+        (ann / "july13_24.gpkg", 24),
+        (ann / "july13_25.gpkg", 25),
+    ]
     if years == [24]:
-        return [(ann / "july9_24input.gpkg", 24)]
+        path = ann / "july13_24.gpkg"
+        return [(path if path.exists() else ann / "july9_24input.gpkg", 24)]
     if years == [25]:
-        return [(ann / "july9_25input.gpkg", 25)]
-    # Both years: separate year-tagged files when present, else merged GPKG.
+        path = ann / "july13_25.gpkg"
+        return [(path if path.exists() else ann / "july9_25input.gpkg", 25)]
+    if all(p.exists() for p, _ in july13):
+        return july13
+    # Legacy fallbacks
     per_year = [
         (ann / "july9_24input.gpkg", 24),
         (ann / "july9_25input.gpkg", 25),
@@ -591,6 +687,28 @@ def default_gpkg_specs(years: list[int], seg_dir: Path) -> list[tuple[Path, int 
     if all(p.exists() for p, _ in per_year):
         return per_year
     return [(ann / "july9_input.gpkg", None)]
+
+
+def default_tiles_used_path(seg_dir: Path) -> Path:
+    return seg_dir / "annotations" / "tiles_used.txt"
+
+
+def resolve_tiles_by_year(seg_dir: Path, tiles_used: Path | None) -> dict[int, list[str]]:
+    """Load tile lists from --tiles-used, else annotations/tiles_used.txt, else baked-in."""
+    candidates = []
+    if tiles_used is not None:
+        candidates.append(tiles_used)
+    candidates.append(default_tiles_used_path(seg_dir))
+    for path in candidates:
+        if path.exists():
+            data = load_tiles_used(path)
+            print(f"Tile list: {path} (24={len(data[24])}, 25={len(data[25])})")
+            return data
+    print(
+        f"Tile list: baked-in tiles_used snapshot "
+        f"(24={len(TILES_24)}, 25={len(TILES_25)})"
+    )
+    return {24: list(TILES_24), 25: list(TILES_25)}
 
 
 def default_roi_paths(years: list[int], seg_dir: Path) -> list[Path]:
@@ -643,8 +761,8 @@ def main() -> None:
         default=None,
         help=(
             "Annotation GPKG(s). Comma-separated; optional :24/:25 year tags. "
-            "Examples: july9_input.gpkg | a.gpkg:24,b.gpkg:25. "
-            "Default: per-year july9_24input/july9_25input when both exist."
+            "Examples: july13_24.gpkg:24,july13_25.gpkg:25. "
+            "Default: july13_24.gpkg + july13_25.gpkg when both exist."
         ),
     )
     parser.add_argument("--layer", type=str, default=None)
@@ -662,6 +780,15 @@ def main() -> None:
         "--no-roi",
         action="store_true",
         help="Disable ROI clipping (same as --roi none).",
+    )
+    parser.add_argument(
+        "--tiles-used",
+        type=Path,
+        default=None,
+        help=(
+            "Path to tiles_used.txt (row:col-range format). "
+            "Default: segmentation/annotations/tiles_used.txt when present."
+        ),
     )
     parser.add_argument("--tile-dir", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
@@ -699,7 +826,8 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(f"Annotation GPKG not found: {path}")
 
-    train_default, valid_default, test_default = expand_year_keys(years)
+    tiles_by_year = resolve_tiles_by_year(seg_dir, args.tiles_used)
+    train_default, valid_default, test_default = expand_year_keys(years, tiles_by_year)
 
     if args.no_roi or (args.roi is not None and str(args.roi).lower() == "none"):
         roi_paths: list[Path] = []
