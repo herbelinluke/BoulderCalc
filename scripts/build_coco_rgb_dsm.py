@@ -74,7 +74,8 @@ def main() -> None:
     parser.add_argument(
         "--source-coco",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/segmentation/coco_dataset"),
+        default=Path("segmentation/coco_dataset"),
+        help="Source RGB COCO dataset dir. Default: segmentation/coco_dataset",
     )
     parser.add_argument(
         "--tile-dirs",
@@ -86,7 +87,8 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/segmentation/coco_dataset_rgb_dsm"),
+        default=Path("segmentation/coco_dataset_rgb_dsm"),
+        help="Output 4-band COCO dataset dir. Default: segmentation/coco_dataset_rgb_dsm",
     )
     args = parser.parse_args()
 

@@ -230,12 +230,14 @@ def main() -> None:
     parser.add_argument(
         "--dataset-dir",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/segmentation/coco_dataset"),
+        default=Path("segmentation/coco_dataset"),
+        help="COCO dataset dir. Default: segmentation/coco_dataset",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/segmentation/training_run"),
+        default=Path("segmentation/training_run"),
+        help="Training output dir. Default: segmentation/training_run",
     )
     parser.add_argument("--max-iter", type=int, default=60)
     parser.add_argument("--batch-size", type=int, default=1)

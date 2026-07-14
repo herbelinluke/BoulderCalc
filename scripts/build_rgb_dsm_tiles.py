@@ -9,6 +9,10 @@ DSM scaling modes:
   elevation     per-tile 2–98 percentile stretch of absolute elevation (default)
   local_relief  DSM minus Gaussian-smoothed DSM, then percentile stretch
 
+Run from the project root (directory that contains ``segmentation/`` and
+``2024/`` / ``2025/``). Paths are relative so the same commands work on
+Linux and Windows.
+
 Example:
   python BoulderCalculator/scripts/build_rgb_dsm_tiles.py --year 25
   python BoulderCalculator/scripts/build_rgb_dsm_tiles.py --year 24 --tile-keys 14_15,15_10
@@ -194,7 +198,8 @@ def main() -> None:
     parser.add_argument(
         "--ortho-dir",
         type=Path,
-        default=Path("/home/herbs/Documents/tamucc/segmentation/tiling"),
+        default=Path("segmentation/tiling"),
+        help="Ortho tile root (layout: tiling/{24,25}/...). Default: segmentation/tiling",
     )
     parser.add_argument(
         "--output-dir",
@@ -229,11 +234,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    project_root = Path("/home/herbs/Documents/tamucc")
+    # CWD is the project root (same relative layout on Linux/Windows).
+    project_root = Path(".")
     if args.dsm is None:
         args.dsm = default_dsm(project_root, args.year)
     if not args.dsm.exists():
-        raise FileNotFoundError(args.dsm)
+        raise FileNotFoundError(
+            f"DSM not found: {args.dsm} (run from project root, or pass --dsm)"
+        )
 
     seg_root = args.ortho_dir.parent if args.ortho_dir.name == "tiling" else args.ortho_dir
     if args.output_dir is None:
