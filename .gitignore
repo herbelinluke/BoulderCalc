@@ -1,5 +1,23 @@
-# List of untracked files to ignore
+# Test data
+matching/data/
+
+# Generated outputs
+matching/results/
+
+# Geospatial data
+*.gpkg
+*.tif
+*.tiff
+*.geojson
+
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
-.Python
+
+# macOS
+.DS_Store
+
+# Virtual environments
+.venv/
+venv/
