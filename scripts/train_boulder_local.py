@@ -3,6 +3,10 @@
 
 Supports standard 3-band RGB tiles (default) or 4-band RGB+DSM GeoTIFFs via
 ``--four-band`` (custom rasterio mapper + 4-channel ResNet stem).
+
+COCO ``iscrowd=1`` polygons (deposits / sub-threshold boulders from
+``gpkg_to_coco.py``) are treated as ignore regions: not positives, and not
+used as background negatives in RPN / ROI loss (see ``crowd_ignore.py``).
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ import numpy as np
 import torch
 from detectron2 import model_zoo
 from detectron2.config import get_cfg
-from detectron2.data import DatasetCatalog, DatasetMapper, MetadataCatalog, build_detection_test_loader, build_detection_train_loader
+from detectron2.data import DatasetCatalog, MetadataCatalog, build_detection_test_loader, build_detection_train_loader
 from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.datasets import register_coco_instances
@@ -27,6 +31,13 @@ from detectron2.engine import DefaultTrainer
 from detectron2.evaluation import COCOEvaluator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crowd_ignore import (  # noqa: E402
+    CrowdAwareDatasetMapper,
+    GeneralizedRCNNWithIgnore,
+    RPNWithIgnore,
+    StandardROIHeadsWithIgnore,
+    transform_annotations_with_ignore,
+)
 from multiband_io import (  # noqa: E402
     FOUR_BAND_PIXEL_MEAN,
     FOUR_BAND_PIXEL_STD,
@@ -34,9 +45,12 @@ from multiband_io import (  # noqa: E402
     patch_four_band_stem_from_checkpoint,
 )
 
+# Ensure custom meta-arch / RPN / ROI heads are registered (side effects).
+_ = (GeneralizedRCNNWithIgnore, RPNWithIgnore, StandardROIHeadsWithIgnore)
 
-class FourBandDatasetMapper(DatasetMapper):
-    """Like DatasetMapper, but loads 4-band BGR+DSM via rasterio."""
+
+class FourBandDatasetMapper(CrowdAwareDatasetMapper):
+    """Like CrowdAwareDatasetMapper, but loads 4-band BGR+DSM via rasterio."""
 
     def __call__(self, dataset_dict):
         dataset_dict = copy.deepcopy(dataset_dict)
@@ -68,7 +82,9 @@ class FourBandDatasetMapper(DatasetMapper):
             return dataset_dict
 
         if "annotations" in dataset_dict:
-            self._transform_annotations(dataset_dict, transforms, image_shape)
+            transform_annotations_with_ignore(
+                self, dataset_dict, transforms, image_shape
+            )
 
         return dataset_dict
 
@@ -87,8 +103,9 @@ class BoulderTrainer(DefaultTrainer):
     def build_train_loader(cls, cfg):
         if cls.four_band:
             mapper = FourBandDatasetMapper(cfg, is_train=True)
-            return build_detection_train_loader(cfg, mapper=mapper)
-        return super().build_train_loader(cfg)
+        else:
+            mapper = CrowdAwareDatasetMapper(cfg, is_train=True)
+        return build_detection_train_loader(cfg, mapper=mapper)
 
     @classmethod
     def build_test_loader(cls, cfg, dataset_name):
@@ -156,6 +173,10 @@ def build_cfg(
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
         "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
     )
+    # Crowd-ignore path for COCO iscrowd=1 (deposits / small boulders).
+    cfg.MODEL.META_ARCHITECTURE = "GeneralizedRCNNWithIgnore"
+    cfg.MODEL.PROPOSAL_GENERATOR.NAME = "RPNWithIgnore"
+    cfg.MODEL.ROI_HEADS.NAME = "StandardROIHeadsWithIgnore"
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = num_classes
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.DEVICE = device
@@ -194,9 +215,12 @@ def summarize_dataset(base_path: Path) -> dict:
         ("test", "testing_annotations.json"),
     ]:
         data = json.loads((base_path / ann_name).read_text())
+        n_crowd = sum(1 for a in data["annotations"] if a.get("iscrowd", 0))
         summary[split] = {
             "images": len(data["images"]),
             "annotations": len(data["annotations"]),
+            "trainable": len(data["annotations"]) - n_crowd,
+            "crowd_ignore": n_crowd,
         }
     return summary
 

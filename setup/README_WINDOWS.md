@@ -89,7 +89,7 @@ polys only label 24 tiles). ROI clipping is off by default.
 
 ```bat
 :: Step 1 - per-year GPKGs + tiles_used.txt -> 1-class COCO (~199 tiles).
-::   --years 24,25 is the default. --boulder-only (default) drops deposits.
+::   --years 24,25 is the default. --boulder-only (default) keeps deposits/sub-threshold boulders as iscrowd ignore regions.
 ::   Defaults: july13_24.gpkg:24 + july13_25.gpkg:25 when present.
 ::   ROI off by default; pass --roi path to enable. Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0

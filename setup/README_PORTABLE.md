@@ -143,6 +143,11 @@ Notes:
 - Annotations are reprojected to EPSG:25829, clipped to the ROI union (if any)
   and each tile extent, then converted to pixel coordinates.
 - Categories: `1 = Boulder` only when `--boulder-only` (default).
+- With `--boulder-only` (default), BoulderDeposit polygons and Boulder
+  polygons below `--min-area-m2` are kept as COCO `iscrowd=1` ignore regions
+  (not trainable positives; `train_boulder_local.py` also excludes them from
+  background/negative loss). Use `--no-boulder-only` to train deposits as
+  category 2 instead.
 - Copied tile filenames are year-prefixed (`24_...`, `25_...`) so years never
   collide in one dataset folder.
 - Splits (~199 annotated tiles): ~111 train / 27 valid / 42 test, plus ~19 excluded as a spatial buffer. Hold-outs are geographic blocks so 2024/2025 overlapping footprints never cross train↔valid/test (or valid↔test).
@@ -400,7 +405,7 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 | Script | Purpose |
 |--------|---------|
-| `gpkg_to_coco.py` | GPKG + `tiles_used.txt` → COCO (boulder-only or two-class; ROI optional) |
+| `gpkg_to_coco.py` | GPKG + `tiles_used.txt` → COCO (boulder-only+crowd-ignore, or two-class; ROI optional) |
 | `build_rgb_dsm_tiles.py` | Warp DSM onto ortho tiles → 4-band RGB+DSM GeoTIFFs |
 | `build_coco_rgb_dsm.py` | Copy COCO annotations onto 4-band tile images |
 | `augment_coco_dataset.py` | Offline train-split augmentation (flips/rotations/jitter; keeps DSM band) |
