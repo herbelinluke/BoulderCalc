@@ -88,6 +88,29 @@ The matcher generates:
 These outputs can be loaded directly into QGIS for visualization and
 quality control.
 
+Quick look without QGIS (overview + ortho crops, optional GUI):
+
+``` bash
+python -m matching.visualize \
+  --results-dir data/results \
+  --outdir data/screenshots \
+  --before data/before.geojson \
+  --after data/after.geojson \
+  --after-ortho /path/to/after_ortho.tif
+
+# Interactive browser (n/p to flip matches):
+python -m matching.visualize --results-dir data/results --gui \
+  --before data/before.geojson --after data/after.geojson \
+  --after-ortho /path/to/after_ortho.tif --no-screenshots
+```
+
+For the `training_run_rgb_dsm_4000` july14 annotations + DSMs:
+
+``` bash
+./run_training_run_match.sh          # rematch + screenshots
+./run_training_run_match.sh --gui    # also open the browser
+```
+
 ## Matching Method
 
 Candidate matches are evaluated using:
