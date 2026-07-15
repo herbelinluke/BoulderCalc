@@ -203,6 +203,88 @@ def _match_pair_geoms(
     return before_geom, after_geom
 
 
+def _match_bounds(before_geom, after_geom, pad_m: float):
+    geoms = [g for g in (before_geom, after_geom) if g is not None]
+    if not geoms:
+        return None
+    minx = min(g.bounds[0] for g in geoms) - pad_m
+    miny = min(g.bounds[1] for g in geoms) - pad_m
+    maxx = max(g.bounds[2] for g in geoms) + pad_m
+    maxy = max(g.bounds[3] for g in geoms) + pad_m
+    return (minx, miny, maxx, maxy)
+
+
+def _pick_pair_rasters(
+    bounds,
+    before_raster: Path | None,
+    after_raster: Path | None,
+    pair_tiles: list[tuple[str, str]] | None,
+) -> tuple[Path | None, Path | None]:
+    """Choose 2024/2025 rasters whose footprint covers the match (if pair list given)."""
+    if not pair_tiles or bounds is None or rasterio is None:
+        return before_raster, after_raster
+
+    cx = 0.5 * (bounds[0] + bounds[2])
+    cy = 0.5 * (bounds[1] + bounds[3])
+    for b24, b25 in pair_tiles:
+        p24, p25 = Path(b24), Path(b25)
+        if not p24.exists() or not p25.exists():
+            continue
+        try:
+            with rasterio.open(p25) as src:
+                left, bottom, right, top = src.bounds
+            if left <= cx <= right and bottom <= cy <= top:
+                return p24, p25
+        except Exception:  # noqa: BLE001
+            continue
+    return Path(pair_tiles[0][0]), Path(pair_tiles[0][1])
+
+
+def _draw_panel(
+    ax,
+    raster: Path | None,
+    geom,
+    bounds,
+    edgecolor: str,
+    title: str,
+):
+    shown = False
+    if raster and Path(raster).exists() and bounds is not None:
+        try:
+            rgb, extent = _window_rgb(raster, bounds)
+            ax.imshow(rgb, extent=extent, origin="upper")
+            shown = True
+        except Exception as exc:  # noqa: BLE001
+            ax.text(
+                0.02,
+                0.02,
+                f"raster preview failed: {exc}",
+                transform=ax.transAxes,
+                fontsize=7,
+                color="red",
+            )
+    if not shown:
+        ax.set_facecolor("#1a1a1a")
+
+    if geom is not None:
+        gpd.GeoSeries([geom], crs="EPSG:25829").plot(
+            ax=ax, facecolor="none", edgecolor=edgecolor, linewidth=2.0
+        )
+        ax.plot(
+            [geom.centroid.x],
+            [geom.centroid.y],
+            marker="o",
+            color=edgecolor,
+            markersize=5,
+        )
+
+    if bounds is not None:
+        ax.set_xlim(bounds[0], bounds[2])
+        ax.set_ylim(bounds[1], bounds[3])
+    ax.set_aspect("equal")
+    ax.set_title(title)
+
+
 def plot_match_detail(
     match_row,
     before: gpd.GeoDataFrame | None,
@@ -211,22 +293,53 @@ def plot_match_detail(
     after_raster: Path | None = None,
     pad_m: float = 8.0,
     ax=None,
+    side_by_side: bool = True,
+    pair_tiles: list[tuple[str, str]] | None = None,
+    axes=None,
 ):
-    ax = ax or plt.gca()
+    """Plot one match. Default is side-by-side 2024 | 2025 panels."""
     before_geom, after_geom = _match_pair_geoms(match_row, before, after)
+    bounds = _match_bounds(before_geom, after_geom, pad_m)
+    before_raster, after_raster = _pick_pair_rasters(
+        bounds, before_raster, after_raster, pair_tiles
+    )
 
-    geoms = [g for g in (before_geom, after_geom) if g is not None]
-    if not geoms:
+    score = match_row.get("match_score", np.nan)
+    dist = match_row.get("distance_m", np.nan)
+    subtitle = (
+        f"before={match_row.get('before_id')} → after={match_row.get('after_id')}  "
+        f"score={score:.3f}  dist={dist:.2f}m"
+    )
+
+    if side_by_side:
+        if axes is None:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+        else:
+            fig = axes[0].figure
+        _draw_panel(
+            axes[0],
+            before_raster,
+            before_geom,
+            bounds,
+            COLORS["before"],
+            "2024 (before)",
+        )
+        _draw_panel(
+            axes[1],
+            after_raster,
+            after_geom,
+            bounds,
+            COLORS["after"],
+            "2025 (after)",
+        )
+        fig.suptitle(subtitle, fontsize=11)
+        return axes
+
+    # Legacy single-panel overlay
+    ax = ax or plt.gca()
+    if bounds is None:
         ax.set_title("No geometry")
         return ax
-
-    minx = min(g.bounds[0] for g in geoms) - pad_m
-    miny = min(g.bounds[1] for g in geoms) - pad_m
-    maxx = max(g.bounds[2] for g in geoms) + pad_m
-    maxy = max(g.bounds[3] for g in geoms) + pad_m
-    bounds = (minx, miny, maxx, maxy)
-
-    # Prefer after ortho; fall back to before; else blank
     shown = False
     for raster in (after_raster, before_raster):
         if raster and Path(raster).exists():
@@ -236,18 +349,9 @@ def plot_match_detail(
                 shown = True
                 break
             except Exception as exc:  # noqa: BLE001
-                ax.text(
-                    0.02,
-                    0.02,
-                    f"raster preview failed: {exc}",
-                    transform=ax.transAxes,
-                    fontsize=7,
-                    color="red",
-                )
-
+                ax.text(0.02, 0.02, f"raster preview failed: {exc}", transform=ax.transAxes, fontsize=7, color="red")
     if not shown:
         ax.set_facecolor("#1a1a1a")
-
     if before_geom is not None:
         gpd.GeoSeries([before_geom], crs="EPSG:25829").plot(
             ax=ax, facecolor="none", edgecolor=COLORS["before"], linewidth=2.0
@@ -256,29 +360,10 @@ def plot_match_detail(
         gpd.GeoSeries([after_geom], crs="EPSG:25829").plot(
             ax=ax, facecolor="none", edgecolor=COLORS["after"], linewidth=2.0
         )
-
-    if before_geom is not None and after_geom is not None:
-        xs = [before_geom.centroid.x, after_geom.centroid.x]
-        ys = [before_geom.centroid.y, after_geom.centroid.y]
-        ax.plot(xs, ys, color=COLORS["vector"], linewidth=1.5, marker="o", markersize=4)
-
-    score = match_row.get("match_score", np.nan)
-    dist = match_row.get("distance_m", np.nan)
-    ax.set_xlim(minx, maxx)
-    ax.set_ylim(miny, maxy)
+    ax.set_xlim(bounds[0], bounds[2])
+    ax.set_ylim(bounds[1], bounds[3])
     ax.set_aspect("equal")
-    ax.set_title(
-        f"before={match_row.get('before_id')} → after={match_row.get('after_id')}  "
-        f"score={score:.3f}  dist={dist:.2f}m"
-    )
-    ax.legend(
-        handles=[
-            Patch(edgecolor=COLORS["before"], facecolor="none", label="Before"),
-            Patch(edgecolor=COLORS["after"], facecolor="none", label="After"),
-        ],
-        loc="upper right",
-        fontsize=8,
-    )
+    ax.set_title(subtitle)
     return ax
 
 
@@ -291,6 +376,8 @@ def export_screenshots(
     after_raster: Path | None = None,
     max_matches: int = 50,
     pad_m: float = 8.0,
+    side_by_side: bool = True,
+    pair_tiles: list[tuple[str, str]] | None = None,
 ):
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -309,16 +396,31 @@ def export_screenshots(
 
     ranked = matches.sort_values("match_score", ascending=False).head(max_matches)
     for i, (_, row) in enumerate(ranked.iterrows()):
-        fig, ax = plt.subplots(figsize=(7, 7))
-        plot_match_detail(
-            row,
-            before=before,
-            after=after,
-            before_raster=before_raster,
-            after_raster=after_raster,
-            pad_m=pad_m,
-            ax=ax,
-        )
+        if side_by_side:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+            plot_match_detail(
+                row,
+                before=before,
+                after=after,
+                before_raster=before_raster,
+                after_raster=after_raster,
+                pad_m=pad_m,
+                side_by_side=True,
+                pair_tiles=pair_tiles,
+                axes=axes,
+            )
+        else:
+            fig, ax = plt.subplots(figsize=(7, 7))
+            plot_match_detail(
+                row,
+                before=before,
+                after=after,
+                before_raster=before_raster,
+                after_raster=after_raster,
+                pad_m=pad_m,
+                side_by_side=False,
+                ax=ax,
+            )
         fig.tight_layout()
         path = outdir / f"match_{i:03d}_b{int(row['before_id'])}_a{int(row['after_id'])}.png"
         fig.savefig(path, dpi=120)
@@ -333,6 +435,8 @@ def run_gui(
     before_raster: Path | None = None,
     after_raster: Path | None = None,
     pad_m: float = 8.0,
+    side_by_side: bool = True,
+    pair_tiles: list[tuple[str, str]] | None = None,
 ):
     matches = results["matches"].sort_values("match_score", ascending=False).reset_index(drop=True)
     if matches.empty:
@@ -344,32 +448,59 @@ def run_gui(
 
     state = {"idx": 0}
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7))
+    if side_by_side:
+        fig = plt.figure(figsize=(16, 7))
+        ax_overview = fig.add_subplot(1, 3, 1)
+        ax_before = fig.add_subplot(1, 3, 2)
+        ax_after = fig.add_subplot(1, 3, 3)
+        detail_axes = [ax_before, ax_after]
+    else:
+        fig, (ax_overview, ax_detail) = plt.subplots(1, 2, figsize=(14, 7))
+        detail_axes = None
+
     fig.canvas.manager.set_window_title("Boulder match browser")
 
     def redraw():
-        axes[0].cla()
-        axes[1].cla()
-        plot_overview(results, ax=axes[0], title="Overview (n=next, p=prev, o=overview focus)")
+        ax_overview.cla()
+        plot_overview(results, ax=ax_overview, title="Overview (n/p flip, o zoom)")
         row = matches.iloc[state["idx"]]
-        # Highlight current vector if present
         if not results["vectors"].empty:
             cur = results["vectors"][
                 (results["vectors"]["before_id"] == row["before_id"])
                 & (results["vectors"]["after_id"] == row["after_id"])
             ]
             if not cur.empty:
-                cur.plot(ax=axes[0], color="yellow", linewidth=2.5)
-        plot_match_detail(
-            row,
-            before=before,
-            after=after,
-            before_raster=before_raster,
-            after_raster=after_raster,
-            pad_m=pad_m,
-            ax=axes[1],
-        )
-        axes[1].set_xlabel(f"Match {state['idx'] + 1} / {len(matches)}")
+                cur.plot(ax=ax_overview, color="yellow", linewidth=2.5)
+
+        if side_by_side:
+            for a in detail_axes:
+                a.cla()
+            plot_match_detail(
+                row,
+                before=before,
+                after=after,
+                before_raster=before_raster,
+                after_raster=after_raster,
+                pad_m=pad_m,
+                side_by_side=True,
+                pair_tiles=pair_tiles,
+                axes=detail_axes,
+            )
+            detail_axes[1].set_xlabel(f"Match {state['idx'] + 1} / {len(matches)}")
+        else:
+            ax_detail.cla()
+            plot_match_detail(
+                row,
+                before=before,
+                after=after,
+                before_raster=before_raster,
+                after_raster=after_raster,
+                pad_m=pad_m,
+                side_by_side=False,
+                ax=ax_detail,
+            )
+            ax_detail.set_xlabel(f"Match {state['idx'] + 1} / {len(matches)}")
+
         fig.tight_layout()
         fig.canvas.draw_idle()
 
@@ -381,7 +512,6 @@ def run_gui(
             state["idx"] = (state["idx"] - 1) % len(matches)
             redraw()
         elif event.key == "o":
-            # zoom overview to current match
             row = matches.iloc[state["idx"]]
             before_geom, after_geom = _match_pair_geoms(row, before, after)
             geoms = [g for g in (before_geom, after_geom, row.geometry) if g is not None]
@@ -390,8 +520,8 @@ def run_gui(
                 miny = min(g.bounds[1] for g in geoms) - 25
                 maxx = max(g.bounds[2] for g in geoms) + 25
                 maxy = max(g.bounds[3] for g in geoms) + 25
-                axes[0].set_xlim(minx, maxx)
-                axes[0].set_ylim(miny, maxy)
+                ax_overview.set_xlim(minx, maxx)
+                ax_overview.set_ylim(miny, maxy)
                 fig.canvas.draw_idle()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
@@ -414,12 +544,22 @@ def main():
     parser.add_argument("--pad-m", type=float, default=8.0)
     parser.add_argument("--gui", action="store_true", help="Open interactive browser")
     parser.add_argument("--no-screenshots", action="store_true")
+    parser.add_argument(
+        "--overlay",
+        action="store_true",
+        help="Single panel with both outlines overlaid (default: side-by-side 2024|2025).",
+    )
+    parser.add_argument(
+        "--pair-tiles",
+        type=str,
+        default=None,
+        help="Comma-separated 24tif:25tif pairs for per-match background picking.",
+    )
     args = parser.parse_args()
 
     results = load_results(args.results_dir)
     before, after = load_inputs(args.before, args.after)
 
-    # Attach id columns if missing (matcher indices)
     if before is not None and "before_id" not in before.columns:
         before = before.copy()
         before["before_id"] = before.index
@@ -429,7 +569,14 @@ def main():
 
     before_raster = args.before_ortho or args.before_dsm
     after_raster = args.after_ortho or args.after_dsm
+    pair_tiles = None
+    if args.pair_tiles:
+        pair_tiles = []
+        for item in args.pair_tiles.split(","):
+            left, right = item.split(":")
+            pair_tiles.append((left.strip(), right.strip()))
 
+    side_by_side = not args.overlay
     if not args.no_screenshots:
         outdir = args.outdir or (args.results_dir / "screenshots")
         export_screenshots(
@@ -441,6 +588,8 @@ def main():
             after_raster=after_raster,
             max_matches=args.max_matches,
             pad_m=args.pad_m,
+            side_by_side=side_by_side,
+            pair_tiles=pair_tiles,
         )
 
     if args.gui:
@@ -451,9 +600,10 @@ def main():
             before_raster=before_raster,
             after_raster=after_raster,
             pad_m=args.pad_m,
+            side_by_side=side_by_side,
+            pair_tiles=pair_tiles,
         )
     elif results["matches"].empty:
-        # still print a text summary when no screenshots were requested?
         print(
             f"Matches={len(results['matches'])} "
             f"Appeared={len(results['appeared'])} "

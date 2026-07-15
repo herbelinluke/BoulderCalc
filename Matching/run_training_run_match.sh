@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Run boulder matching + screenshot export for training_run_rgb_dsm_4000.
+# Inference → match → side-by-side screenshots for training_run_rgb_dsm_4000.
+# Default test set = gpkg_to_coco TEST_24 (27) + TEST_25 (15) = 42 tiles.
+#
 # Usage:
-#   ./run_training_run_match.sh              # match + screenshots
-#   ./run_training_run_match.sh --gui        # also open interactive browser
+#   ./run_training_run_match.sh                 # full pipeline
+#   ./run_training_run_match.sh --gui           # full pipeline, then open browser
+#   ./run_training_run_match.sh --gui-only      # browse existing results (no inference)
+#   ./run_training_run_match.sh --screenshots-only
 
 set -euo pipefail
 
@@ -10,67 +14,52 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PY="${ROOT}/.venv_boulder/bin/python"
 MATCH_DIR="${ROOT}/BoulderCalculator/Matching"
 OUT="${ROOT}/segmentation/training_run_rgb_dsm_4000/matching"
-ANN="${ROOT}/segmentation/annotations"
+MODEL="${ROOT}/segmentation/training_run_rgb_dsm_4000/model_final.pth"
 
-GUI=0
+GUI_ONLY=0
+SHOTS_ONLY=0
+EXTRA=()
 for arg in "$@"; do
-  [[ "$arg" == "--gui" ]] && GUI=1
+  case "$arg" in
+    --gui-only) GUI_ONLY=1 ;;
+    --screenshots-only) SHOTS_ONLY=1 ;;
+    *) EXTRA+=("$arg") ;;
+  esac
 done
 
-mkdir -p "$OUT/inputs" "$OUT/results" "$OUT/screenshots"
-
-echo "=== Preparing boulder-only GeoJSONs (EPSG:25829) ==="
-"$PY" <<PY
-import geopandas as gpd
-from pathlib import Path
-
-ann = Path("${ANN}")
-out = Path("${OUT}/inputs")
-
-def load_boulders(path):
-    gdf = gpd.read_file(path)
-    cls = gdf["Class"].astype(str).str.strip()
-    gdf = gdf[cls.isin(["0", "0.0"]) & gdf.geometry.notnull()].copy()
-    gdf["geometry"] = gdf.geometry.buffer(0)
-    gdf = gdf[~gdf.geometry.is_empty].to_crs("EPSG:25829")
-    return gdf[gdf.geometry.area >= 0.1].reset_index(drop=True)
-
-before = load_boulders(ann / "july14_24.gpkg")
-after = load_boulders(ann / "july14_25.gpkg")
-before.to_file(out / "before_boulders_25829.geojson", driver="GeoJSON")
-after.to_file(out / "after_boulders_25829.geojson", driver="GeoJSON")
-print(f"before={len(before)} after={len(after)}")
-PY
-
-echo "=== Matching with DSM volumes ==="
 cd "$MATCH_DIR"
-"$PY" -m matching.cli \
-  --before "$OUT/inputs/before_boulders_25829.geojson" \
-  --after "$OUT/inputs/after_boulders_25829.geojson" \
-  --before-dsm "${ROOT}/2024/Sites1and2_2024_DSM_30mm.tif" \
-  --after-dsm "${ROOT}/2025/25IniSouthDSM.tif" \
-  --compute-volume \
-  --outdir "$OUT/results" \
-  --search-radius 5.0 \
-  --min-score 0.55
 
-echo "=== Screenshots ==="
-export MPLBACKEND=Agg
-VIZ_ARGS=(
-  -m matching.visualize
-  --results-dir "$OUT/results"
-  --outdir "$OUT/screenshots"
-  --before "$OUT/inputs/before_boulders_25829.geojson"
-  --after "$OUT/inputs/after_boulders_25829.geojson"
-  --before-ortho "${ROOT}/2024/Sites1and2_2024_Orthomosaic.tif"
-  --after-ortho "${ROOT}/2025/25IniSouthOrt.tif"
-  --max-matches 30
-)
-if [[ "$GUI" -eq 1 ]]; then
-  unset MPLBACKEND
-  VIZ_ARGS+=(--gui)
+export PYTHONUNBUFFERED=1
+
+if [[ "$GUI_ONLY" -eq 1 || "$SHOTS_ONLY" -eq 1 ]]; then
+  VIEW_ARGS=( -m matching.view_results --outdir "$OUT" )
+  [[ "$GUI_ONLY" -eq 1 ]] && VIEW_ARGS+=( --gui )
+  [[ "$SHOTS_ONLY" -eq 1 ]] && VIEW_ARGS+=( --screenshots )
+  # GUI needs a real display backend
+  if [[ "$GUI_ONLY" -eq 1 ]]; then
+    unset MPLBACKEND || true
+  else
+    export MPLBACKEND="${MPLBACKEND:-Agg}"
+  fi
+  exec "$PY" "${VIEW_ARGS[@]}"
 fi
-"$PY" "${VIZ_ARGS[@]}"
 
-echo "Done. Results: $OUT/results"
-echo "Screenshots: $OUT/screenshots"
+export MPLBACKEND="${MPLBACKEND:-Agg}"
+"$PY" -m matching.run_inference_match \
+  --model "$MODEL" \
+  --outdir "$OUT" \
+  --project-root "$ROOT" \
+  --score-thresh 0.4 \
+  --search-radius 5.0 \
+  --min-score 0.55 \
+  --device cpu \
+  "${EXTRA[@]}"
+
+echo "Done."
+echo "  Predictions: $OUT/predictions"
+echo "  Results:     $OUT/results"
+echo "  Screenshots: $OUT/screenshots"
+echo "  Summary:     $OUT/match_summary.json"
+echo
+echo "Browse without re-inferring:"
+echo "  ./run_training_run_match.sh --gui-only"

@@ -104,11 +104,16 @@ python -m matching.visualize --results-dir data/results --gui \
   --after-ortho /path/to/after_ortho.tif --no-screenshots
 ```
 
-For the `training_run_rgb_dsm_4000` july14 annotations + DSMs:
+For the `training_run_rgb_dsm_4000` model against the full **42-tile**
+hold-out set from `gpkg_to_coco.py` (`TEST_24` 27 + `TEST_25` 15):
+for each test tile, build a same-extent opposite-year RGB+DSM window,
+run the 4-band model on both years, match, and write side-by-side shots.
 
 ``` bash
-./run_training_run_match.sh          # rematch + screenshots
-./run_training_run_match.sh --gui    # also open the browser
+./run_training_run_match.sh                 # inference + match + screenshots
+./run_training_run_match.sh --gui           # same, then open browser
+./run_training_run_match.sh --gui-only      # browse existing results (no inference)
+./run_training_run_match.sh --screenshots-only
 ```
 
 ## Matching Method
