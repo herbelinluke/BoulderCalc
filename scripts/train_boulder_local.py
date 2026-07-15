@@ -154,13 +154,21 @@ def build_cfg(
     num_classes: int = 1,
     four_band: bool = False,
     image_size: int = 2000,
+    eval_during_train: bool = True,
 ) -> detectron2.config.CfgNode:
     cfg = get_cfg()
     cfg.merge_from_file(
         model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     )
     cfg.DATASETS.TRAIN = ("boulder_train",)
-    # cfg.DATASETS.TEST = ("boulder_valid",)
+    # Always override the zoo default (coco_2017_val). Leaving this unset
+    # makes EvalHook look for datasets/coco/annotations/instances_val2017.json.
+    if eval_during_train:
+        cfg.DATASETS.TEST = ("boulder_valid",)
+        cfg.TEST.EVAL_PERIOD = max(1, min(50, max(1, max_iter // 2)))
+    else:
+        cfg.DATASETS.TEST = ()
+        cfg.TEST.EVAL_PERIOD = 0
     cfg.DATALOADER.NUM_WORKERS = num_workers
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
 
@@ -199,7 +207,6 @@ def build_cfg(
     cfg.SOLVER.STEPS = tuple(sorted(s for s in raw_steps if s < max_iter))
     cfg.SOLVER.GAMMA = 0.1
     cfg.SOLVER.CHECKPOINT_PERIOD = max(1, min(50, max(1, max_iter // 2)))
-    cfg.TEST.EVAL_PERIOD = max(1, min(50, max(1, max_iter // 2)))
     cfg.TEST.DETECTIONS_PER_IMAGE = 300
 
     cfg.OUTPUT_DIR = str(output_dir)
@@ -265,6 +272,14 @@ def main() -> None:
         default=2000,
         help="Square resize used for train/test (default 2000; use smaller for smoke tests).",
     )
+    parser.add_argument(
+        "--no-eval",
+        action="store_true",
+        help=(
+            "Skip periodic validation during training and the final COCO eval. "
+            "Use on low-VRAM GPUs when eval spikes memory or stalls."
+        ),
+    )
     args = parser.parse_args()
 
     BoulderTrainer.four_band = args.four_band
@@ -279,6 +294,7 @@ def main() -> None:
         num_classes=len(class_names),
         four_band=args.four_band,
         image_size=args.image_size,
+        eval_during_train=not args.no_eval,
     )
     if args.weights is not None:
         cfg.MODEL.WEIGHTS = str(args.weights)
@@ -310,6 +326,12 @@ def main() -> None:
 
     trainer.train()
 
+    if args.no_eval:
+        print("Skipping final validation (--no-eval).")
+        return
+
+    # Point TEST at boulder_valid for the post-train eval (may already be set).
+    cfg.DATASETS.TEST = ("boulder_valid",)
     evaluator = BoulderTrainer.build_evaluator(cfg, "boulder_valid")
     eval_results = trainer.test(cfg, trainer.model, evaluators=[evaluator])
     (args.output_dir / "metrics_valid.json").write_text(json.dumps(eval_results, indent=2))
