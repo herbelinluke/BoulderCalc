@@ -160,7 +160,7 @@ def build_cfg(
         model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml")
     )
     cfg.DATASETS.TRAIN = ("boulder_train",)
-    cfg.DATASETS.TEST = ("boulder_valid",)
+    # cfg.DATASETS.TEST = ("boulder_valid",)
     cfg.DATALOADER.NUM_WORKERS = num_workers
     cfg.DATALOADER.FILTER_EMPTY_ANNOTATIONS = False
 
