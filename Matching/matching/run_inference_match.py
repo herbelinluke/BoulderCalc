@@ -30,7 +30,9 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
 # Matching package
+from .dedupe import dedupe_polygons
 from .matcher import BoulderMatcher
+from .qc import run_dod_qc, write_dod_qc
 from .survey import BoulderSurvey
 from .visualize import export_screenshots, load_results, run_gui
 
@@ -483,17 +485,42 @@ def run_pipeline(args: argparse.Namespace) -> dict:
     before = _concat(before_parts)
     after = _concat(after_parts)
 
+    before_raw_path = pred_dir / "before_inferred_boulders_raw.geojson"
+    after_raw_path = pred_dir / "after_inferred_boulders_raw.geojson"
+    write_geojson(before, before_raw_path)
+    write_geojson(after, after_raw_path)
+    print(f"\nCombined predictions (raw): before={len(before)} after={len(after)}")
+
+    n_before_raw, n_after_raw = len(before), len(after)
+    if getattr(args, "dedupe", True) and (not before.empty or not after.empty):
+        before = dedupe_polygons(
+            before,
+            iou_thresh=args.dedupe_iou,
+            centroid_dist_m=args.dedupe_centroid_m,
+        )
+        after = dedupe_polygons(
+            after,
+            iou_thresh=args.dedupe_iou,
+            centroid_dist_m=args.dedupe_centroid_m,
+        )
+        print(
+            f"Dedupe (IoU>={args.dedupe_iou} or centroid≤{args.dedupe_centroid_m}m): "
+            f"before {n_before_raw} → {len(before)}, after {n_after_raw} → {len(after)}"
+        )
+
     before_path = pred_dir / "before_inferred_boulders.geojson"
     after_path = pred_dir / "after_inferred_boulders.geojson"
     write_geojson(before, before_path)
     write_geojson(after, after_path)
-    print(f"\nCombined predictions: before={len(before)} after={len(after)}")
+    print(f"Predictions used for matching: before={len(before)} after={len(after)}")
 
     if before.empty and after.empty:
         summary = {
             "model": str(model),
             "score_thresh": args.score_thresh,
             "tiles": pair_meta,
+            "n_before_raw": n_before_raw,
+            "n_after_raw": n_after_raw,
             "n_before": 0,
             "n_after": 0,
             "matches": 0,
@@ -524,20 +551,44 @@ def run_pipeline(args: argparse.Namespace) -> dict:
     write_geojson(results["disappeared"], results_dir / "disappeared_boulders.geojson")
     write_geojson(results["vectors"], results_dir / "movement_vectors.geojson")
 
+    dod_summary = None
+    if getattr(args, "dod_qc", True) and dsm24.exists() and dsm25.exists():
+        print("Running DoD QC …")
+        try:
+            qc = run_dod_qc(
+                results,
+                before_polygons=before_survey.polygons,
+                after_polygons=after_survey.polygons,
+                before_dsm=dsm24,
+                after_dsm=dsm25,
+                lod_m=args.dod_lod_m,
+                min_change_m3=args.dod_min_change_m3,
+            )
+            qc_dir = results_dir / "dod_qc"
+            write_dod_qc(qc, qc_dir)
+            dod_summary = qc["summary"]
+            print(json.dumps(dod_summary, indent=2))
+            print(f"DoD QC written to {qc_dir}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"DoD QC failed (continuing without it): {exc}")
+
     summary = {
         "model": str(model),
         "score_thresh": args.score_thresh,
         "search_radius": args.search_radius,
         "min_score": args.min_score,
         "tiles": pair_meta,
+        "n_before_raw": n_before_raw,
+        "n_after_raw": n_after_raw,
         "n_before": len(before),
         "n_after": len(after),
         "matches": len(results["matches"]),
         "appeared": len(results["appeared"]),
         "disappeared": len(results["disappeared"]),
+        "dod_qc": dod_summary,
     }
     (outdir / "match_summary.json").write_text(json.dumps(summary, indent=2))
-    print(json.dumps(summary, indent=2))
+    print(json.dumps({k: v for k, v in summary.items() if k != "tiles"}, indent=2))
 
     if not args.no_screenshots:
         export_screenshots(
@@ -591,9 +642,21 @@ def main():
     parser.add_argument("--pad-m", type=float, default=8.0)
     parser.add_argument("--no-screenshots", action="store_true")
     parser.add_argument("--gui", action="store_true")
+    parser.add_argument("--dedupe", action="store_true", default=True)
+    parser.add_argument("--no-dedupe", action="store_true")
+    parser.add_argument("--dedupe-iou", type=float, default=0.4)
+    parser.add_argument("--dedupe-centroid-m", type=float, default=0.75)
+    parser.add_argument("--dod-qc", action="store_true", default=True)
+    parser.add_argument("--no-dod-qc", action="store_true")
+    parser.add_argument("--dod-lod-m", type=float, default=0.08)
+    parser.add_argument("--dod-min-change-m3", type=float, default=0.05)
     args = parser.parse_args()
     if args.no_volume:
         args.compute_volume = False
+    if args.no_dedupe:
+        args.dedupe = False
+    if args.no_dod_qc:
+        args.dod_qc = False
     run_pipeline(args)
 
 

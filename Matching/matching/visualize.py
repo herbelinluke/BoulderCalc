@@ -240,6 +240,32 @@ def _pick_pair_rasters(
     return Path(pair_tiles[0][0]), Path(pair_tiles[0][1])
 
 
+def _draw_displacement_vector(ax, before_geom, after_geom, color=None):
+    """Draw before→after centroid arrow (may extend past panel crop)."""
+    if before_geom is None or after_geom is None:
+        return
+    color = color or COLORS["vector"]
+    x0, y0 = before_geom.centroid.x, before_geom.centroid.y
+    x1, y1 = after_geom.centroid.x, after_geom.centroid.y
+    if abs(x1 - x0) < 1e-6 and abs(y1 - y0) < 1e-6:
+        return
+    ax.annotate(
+        "",
+        xy=(x1, y1),
+        xytext=(x0, y0),
+        arrowprops=dict(
+            arrowstyle="->",
+            color=color,
+            lw=2.0,
+            mutation_scale=14,
+        ),
+        clip_on=False,
+        zorder=5,
+    )
+    ax.plot([x0], [y0], marker="o", color=COLORS["before"], markersize=4, zorder=6)
+    ax.plot([x1], [y1], marker="o", color=COLORS["after"], markersize=4, zorder=6)
+
+
 def _draw_panel(
     ax,
     raster: Path | None,
@@ -247,6 +273,9 @@ def _draw_panel(
     bounds,
     edgecolor: str,
     title: str,
+    before_geom=None,
+    after_geom=None,
+    draw_vector: bool = False,
 ):
     shown = False
     if raster and Path(raster).exists() and bounds is not None:
@@ -278,6 +307,9 @@ def _draw_panel(
             markersize=5,
         )
 
+    if draw_vector:
+        _draw_displacement_vector(ax, before_geom, after_geom)
+
     if bounds is not None:
         ax.set_xlim(bounds[0], bounds[2])
         ax.set_ylim(bounds[1], bounds[3])
@@ -296,6 +328,7 @@ def plot_match_detail(
     side_by_side: bool = True,
     pair_tiles: list[tuple[str, str]] | None = None,
     axes=None,
+    draw_vector: bool = True,
 ):
     """Plot one match. Default is side-by-side 2024 | 2025 panels."""
     before_geom, after_geom = _match_pair_geoms(match_row, before, after)
@@ -323,6 +356,9 @@ def plot_match_detail(
             bounds,
             COLORS["before"],
             "2024 (before)",
+            before_geom=before_geom,
+            after_geom=after_geom,
+            draw_vector=draw_vector,
         )
         _draw_panel(
             axes[1],
@@ -331,6 +367,9 @@ def plot_match_detail(
             bounds,
             COLORS["after"],
             "2025 (after)",
+            before_geom=before_geom,
+            after_geom=after_geom,
+            draw_vector=draw_vector,
         )
         fig.suptitle(subtitle, fontsize=11)
         return axes
@@ -360,6 +399,8 @@ def plot_match_detail(
         gpd.GeoSeries([after_geom], crs="EPSG:25829").plot(
             ax=ax, facecolor="none", edgecolor=COLORS["after"], linewidth=2.0
         )
+    if draw_vector:
+        _draw_displacement_vector(ax, before_geom, after_geom)
     ax.set_xlim(bounds[0], bounds[2])
     ax.set_ylim(bounds[1], bounds[3])
     ax.set_aspect("equal")
@@ -437,6 +478,7 @@ def run_gui(
     pad_m: float = 8.0,
     side_by_side: bool = True,
     pair_tiles: list[tuple[str, str]] | None = None,
+    overview_pad_m: float = 25.0,
 ):
     matches = results["matches"].sort_values("match_score", ascending=False).reset_index(drop=True)
     if matches.empty:
@@ -446,7 +488,7 @@ def run_gui(
         plt.show()
         return
 
-    state = {"idx": 0}
+    state = {"idx": 0, "overview_zoomed": True}
 
     if side_by_side:
         fig = plt.figure(figsize=(16, 7))
@@ -460,17 +502,78 @@ def run_gui(
 
     fig.canvas.manager.set_window_title("Boulder match browser")
 
+    def _overview_full_extent():
+        geoms = []
+        for key in ("matches", "appeared", "disappeared", "vectors"):
+            gdf = results.get(key)
+            if gdf is not None and not gdf.empty:
+                geoms.extend(list(gdf.geometry))
+        if not geoms:
+            return None
+        minx = min(g.bounds[0] for g in geoms)
+        miny = min(g.bounds[1] for g in geoms)
+        maxx = max(g.bounds[2] for g in geoms)
+        maxy = max(g.bounds[3] for g in geoms)
+        pad = max(5.0, 0.05 * max(maxx - minx, maxy - miny))
+        return (minx - pad, miny - pad, maxx + pad, maxy + pad)
+
+    full_extent = _overview_full_extent()
+
+    def _apply_overview_zoom(row):
+        if state["overview_zoomed"]:
+            before_geom, after_geom = _match_pair_geoms(row, before, after)
+            geoms = [g for g in (before_geom, after_geom, row.geometry) if g is not None]
+            if geoms:
+                minx = min(g.bounds[0] for g in geoms) - overview_pad_m
+                miny = min(g.bounds[1] for g in geoms) - overview_pad_m
+                maxx = max(g.bounds[2] for g in geoms) + overview_pad_m
+                maxy = max(g.bounds[3] for g in geoms) + overview_pad_m
+                ax_overview.set_xlim(minx, maxx)
+                ax_overview.set_ylim(miny, maxy)
+                return
+        if full_extent is not None:
+            ax_overview.set_xlim(full_extent[0], full_extent[2])
+            ax_overview.set_ylim(full_extent[1], full_extent[3])
+
     def redraw():
         ax_overview.cla()
-        plot_overview(results, ax=ax_overview, title="Overview (n/p flip, o zoom)")
+        zoom_hint = "zoomed" if state["overview_zoomed"] else "full"
+        plot_overview(
+            results,
+            ax=ax_overview,
+            title=f"Overview ({zoom_hint})  n/p flip, o toggle zoom",
+        )
         row = matches.iloc[state["idx"]]
+        before_geom, after_geom = _match_pair_geoms(row, before, after)
+
+        # Highlight current pair polygons on the left map
+        if before_geom is not None:
+            gpd.GeoSeries([before_geom], crs="EPSG:25829").plot(
+                ax=ax_overview,
+                facecolor="none",
+                edgecolor="yellow",
+                linewidth=2.5,
+                zorder=6,
+            )
+        if after_geom is not None:
+            gpd.GeoSeries([after_geom], crs="EPSG:25829").plot(
+                ax=ax_overview,
+                facecolor="none",
+                edgecolor="cyan",
+                linewidth=2.5,
+                zorder=6,
+            )
         if not results["vectors"].empty:
             cur = results["vectors"][
                 (results["vectors"]["before_id"] == row["before_id"])
                 & (results["vectors"]["after_id"] == row["after_id"])
             ]
             if not cur.empty:
-                cur.plot(ax=ax_overview, color="yellow", linewidth=2.5)
+                cur.plot(ax=ax_overview, color="yellow", linewidth=2.5, zorder=7)
+        elif before_geom is not None and after_geom is not None:
+            _draw_displacement_vector(ax_overview, before_geom, after_geom, color="yellow")
+
+        _apply_overview_zoom(row)
 
         if side_by_side:
             for a in detail_axes:
@@ -485,6 +588,7 @@ def run_gui(
                 side_by_side=True,
                 pair_tiles=pair_tiles,
                 axes=detail_axes,
+                draw_vector=True,
             )
             detail_axes[1].set_xlabel(f"Match {state['idx'] + 1} / {len(matches)}")
         else:
@@ -498,6 +602,7 @@ def run_gui(
                 pad_m=pad_m,
                 side_by_side=False,
                 ax=ax_detail,
+                draw_vector=True,
             )
             ax_detail.set_xlabel(f"Match {state['idx'] + 1} / {len(matches)}")
 
@@ -511,22 +616,16 @@ def run_gui(
         elif event.key in ("p", "left"):
             state["idx"] = (state["idx"] - 1) % len(matches)
             redraw()
-        elif event.key == "o":
-            row = matches.iloc[state["idx"]]
-            before_geom, after_geom = _match_pair_geoms(row, before, after)
-            geoms = [g for g in (before_geom, after_geom, row.geometry) if g is not None]
-            if geoms:
-                minx = min(g.bounds[0] for g in geoms) - 25
-                miny = min(g.bounds[1] for g in geoms) - 25
-                maxx = max(g.bounds[2] for g in geoms) + 25
-                maxy = max(g.bounds[3] for g in geoms) + 25
-                ax_overview.set_xlim(minx, maxx)
-                ax_overview.set_ylim(miny, maxy)
-                fig.canvas.draw_idle()
+        elif event.key in ("o", "O"):
+            state["overview_zoomed"] = not state["overview_zoomed"]
+            redraw()
 
     fig.canvas.mpl_connect("key_press_event", on_key)
     redraw()
-    print("GUI keys: n/→ next, p/← previous, o zoom overview to current match")
+    print(
+        "GUI keys: n/→ next, p/← previous, o toggle overview zoom "
+        "(starts zoomed on current boulder pair)"
+    )
     plt.show()
 
 
