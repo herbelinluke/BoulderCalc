@@ -7,7 +7,7 @@ ROI clipping, multi-year training in one dataset, and boulder-only mode.
 Annotation GPKGs can be year-tagged so each year's polygons only label that
 year's tiles (important if footprints ever overlap):
 
-  --gpkg july13_24.gpkg:24,july13_25.gpkg:25
+  --gpkg july14_24.gpkg:24,july14_25.gpkg:25
 
 Tile lists default from ``segmentation/annotations/tiles_used.txt`` (or the
 baked-in copy of that file). Override with ``--tiles-used``.
@@ -27,7 +27,7 @@ Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
         --segmentation-dir segmentation \\
         --years 24,25 \\
-        --gpkg segmentation/annotations/july13_24.gpkg:24,segmentation/annotations/july13_25.gpkg:25 \\
+        --gpkg segmentation/annotations/july14_24.gpkg:24,segmentation/annotations/july14_25.gpkg:25 \\
         --output-dir segmentation/coco_dataset_both \\
         --min-area-m2 1.0
 
@@ -463,13 +463,26 @@ def load_annotations(
     feats: list[tuple] = []
     unknown_class = 0
     n_deposit = 0
+    skipped_null_geom = 0
+    skipped_bad_geom = 0
     with fiona.open(gpkg_path, **kwargs) as src:
         reproject = make_reprojector(src.crs, WORKING_EPSG)
         for feat in src:
-            geom = shape(feat["geometry"])
+            raw_geom = feat.get("geometry")
+            # QGIS exports sometimes leave null geometry rows; skip them.
+            # (Do not require dict — Fiona may return Mapping / Geometry objects.)
+            if raw_geom is None:
+                skipped_null_geom += 1
+                continue
+            try:
+                geom = shape(raw_geom)
+            except (AttributeError, ValueError, TypeError):
+                skipped_bad_geom += 1
+                continue
             if not geom.is_valid:
                 geom = geom.buffer(0)
             if geom.is_empty:
+                skipped_null_geom += 1
                 continue
             geom = shp_transform(reproject, geom)
             raw = feat["properties"].get(class_field)
@@ -480,6 +493,16 @@ def load_annotations(
                 n_deposit += 1
             feats.append((geom, cls, year))
     tag = f" year={year}" if year is not None else " year=any"
+    if skipped_null_geom:
+        print(
+            f"WARNING: skipped {skipped_null_geom} feature(s) with null/empty "
+            f"geometry in {gpkg_path.name} [{tag.strip()}]"
+        )
+    if skipped_bad_geom:
+        print(
+            f"WARNING: skipped {skipped_bad_geom} feature(s) with unreadable "
+            f"geometry in {gpkg_path.name} [{tag.strip()}]"
+        )
     if unknown_class:
         print(
             f"WARNING: {unknown_class} feature(s) in {gpkg_path.name} missing "
@@ -864,21 +887,27 @@ def parse_path_list(value: str | None) -> list[Path] | None:
 
 
 def default_gpkg_specs(years: list[int], seg_dir: Path) -> list[tuple[Path, int | None]]:
-    """Prefer per-year July 13 GPKGs (year-tagged); fall back to july9 names."""
+    """Prefer newest per-year GPKGs (july14 → july13 → july9)."""
     ann = seg_dir / "annotations"
-    july13 = [
-        (ann / "july13_24.gpkg", 24),
-        (ann / "july13_25.gpkg", 25),
-    ]
+
+    def pick_year(year: int) -> Path:
+        for name in (f"july14_{year}.gpkg", f"july13_{year}.gpkg", f"july9_{year}input.gpkg"):
+            path = ann / name
+            if path.exists():
+                return path
+        return ann / f"july14_{year}.gpkg"
+
     if years == [24]:
-        path = ann / "july13_24.gpkg"
-        return [(path if path.exists() else ann / "july9_24input.gpkg", 24)]
+        return [(pick_year(24), 24)]
     if years == [25]:
-        path = ann / "july13_25.gpkg"
-        return [(path if path.exists() else ann / "july9_25input.gpkg", 25)]
+        return [(pick_year(25), 25)]
+
+    july14 = [(ann / "july14_24.gpkg", 24), (ann / "july14_25.gpkg", 25)]
+    if all(p.exists() for p, _ in july14):
+        return july14
+    july13 = [(ann / "july13_24.gpkg", 24), (ann / "july13_25.gpkg", 25)]
     if all(p.exists() for p, _ in july13):
         return july13
-    # Legacy fallbacks
     per_year = [
         (ann / "july9_24input.gpkg", 24),
         (ann / "july9_25input.gpkg", 25),
@@ -961,7 +990,7 @@ def main() -> None:
         help=(
             "Annotation GPKG(s). Comma-separated; optional :24/:25 year tags. "
             "Examples: july13_24.gpkg:24,july13_25.gpkg:25. "
-            "Default: july13_24.gpkg + july13_25.gpkg when both exist."
+            "Default: july14_24/25.gpkg when present, else july13, else july9."
         ),
     )
     parser.add_argument("--layer", type=str, default=None)
