@@ -37,6 +37,8 @@ Below, `B:` stands for your chosen root. Layout:
 ```text
 B:\
 ├── BoulderCalculator\        (git clone)
+├── 2024\                     (optional DSM for 4-band)
+├── 2025\                     (optional DSM for 4-band)
 ├── segmentation\             (tiling, annotations, tile_extents)
 ├── env\                      (conda env, created below)
 └── cache\                    (pip/conda/torch caches)
@@ -121,11 +123,13 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 
 | File | Purpose |
 |------|---------|
-| `segmentation\annotations\july13_24.gpkg` | 2024 annotations |
-| `segmentation\annotations\july13_25.gpkg` | 2025 annotations |
+| `segmentation\annotations\july14_24.gpkg` | Latest 2024 annotations |
+| `segmentation\annotations\july14_25.gpkg` | Latest 2025 annotations |
 | `segmentation\tiling\24\*.tif` | 2024 ortho tiles |
 | `segmentation\tiling\25\*.tif` | 2025 ortho tiles |
 | `segmentation\annotations\tiles_used.txt` | Annotated tile ranges (source of truth) |
+| `2024\Sites1and2_2024_DSM_30mm.tif` | Optional: RGB+DSM 4-band training |
+| `2025\25IniSouthDSM.tif` | Optional: RGB+DSM 4-band training |
 
 ## 5. Workflow (from `B:\`) — both years, boulder-only
 
@@ -147,8 +151,20 @@ python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentati
 python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_both\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_both\model_final.pth --gt-json segmentation\coco_dataset_both\testing_annotations.json --output-dir segmentation\visualizations\test_inference_both --score-thresh 0.4 --device cuda --class-names "Boulder"
 ```
 
-Before logging out: copy `segmentation\training_run_both\` (at minimum
-`model_final.pth`, `metrics.json`, `metrics_valid.json`) somewhere permanent.
+### Optional — RGB+DSM 4-band
+
+```bat
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 24
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 25
+python BoulderCalculator\scripts\build_coco_rgb_dsm.py --source-coco segmentation\coco_dataset_both --tile-dirs segmentation\tiling_rgb_dsm_24 segmentation\tiling_rgb_dsm_25 --output-dir segmentation\coco_dataset_rgb_dsm
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_rgb_dsm --output-dir segmentation\coco_dataset_rgb_dsm_aug --jitter 0.15
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_rgb_dsm_aug --output-dir segmentation\training_run_rgb_dsm --four-band --max-iter 5000 --batch-size 2 --num-workers 2 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_rgb_dsm\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_rgb_dsm\model_final.pth --gt-json segmentation\coco_dataset_rgb_dsm\testing_annotations.json --output-dir segmentation\visualizations\test_inference_rgb_dsm --score-thresh 0.4 --device cuda --four-band --class-names "Boulder"
+```
+
+Before logging out: copy `segmentation\training_run_both\` or
+`segmentation\training_run_rgb_dsm\` (at minimum `model_final.pth`,
+`metrics.json`, `metrics_valid.json`) somewhere permanent.
 
 ## 6. Guest-account troubleshooting
 
@@ -156,12 +172,13 @@ Before logging out: copy `segmentation\training_run_both\` (at minimum
 |---------|-----|
 | pip: `OSError ... filename too long` / `[WinError 206]` | Paths still too deep — move root closer to a drive letter, use `subst`, re-check the `set` cache redirects ran in *this* terminal |
 | conda env activates but wrong python | `conda activate B:\env` (full path, not a name); check `where python` |
+| `vcvarsall.bat` throws Windows SDK error | Do not specify a fallback version (like `8.1`). Run `vcvarsall.bat x64` to inherit the machine's primary SDK |
+| Building detectron2 crashes on `DISTUTILS_USE_SDK` | Run `set DISTUTILS_USE_SDK=1` and `set FORCE_CUDA=0` right before `pip install` |
 | Downloads fail mid-train (weights) | Pre-download once on another machine and copy into `B:\cache\fvcore\detectron2\...`, or re-run — the download resumes |
 | `subst` drive disappeared | Re-run `subst B: <path>` — mappings reset every logout |
 | Permission denied writing outputs | Guest may not write outside its profile/Public — keep everything under the chosen root |
 | Profile wiped after logout | Expected on true Guest accounts — work from USB/second drive and copy results off first |
-ProblemFixpip: OSError ... filename too long / [WinError 206]Paths still too deep — move root closer to a drive letter, use subst, re-check the set cache redirects ran in this terminal  conda env activates but wrong pythonconda activate B:\env (full path, not a name); check where python  vcvarsall.bat throws Windows SDK errorDo not specify a fallback version parameter (like 8.1). Run vcvarsall.bat x64 to cleanly inherit your machine's primary SDK.Building detectron2 crashes on DISTUTILS_USE_SDKMake sure you explicitly execute set DISTUTILS_USE_SDK=1 and set FORCE_CUDA=0 right before calling pip install.Downloads fail mid-train (weights)Pre-download once on another machine and copy into B:\cache\fvcore\detectron2\..., or re-run — the download resumes  subst drive disappearedRe-run subst B: <path> — mappings reset every logout  Permission denied writing outputsGuest may not write outside its profile/Public — keep everything under the chosen root  Profile wiped after logoutExpected on true Guest accounts — work from USB/second drive and copy results off first  
-
+| 4-band channel / shape errors | Confirm tiles are 4-band and you passed `--four-band` on both train and infer |
 
 Session checklist (every login): `subst` (if used) → `set` cache variables →
 `conda activate B:\env` → work from `B:\`.

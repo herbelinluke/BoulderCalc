@@ -42,14 +42,38 @@ VALID_VARIANTS = (
 
 
 def load_image(path: Path) -> np.ndarray:
-    """Read tile as HxWx3 uint8 RGB using rasterio (handles GeoTIFF bands)."""
+    """Read tile as HxWxC uint8 (3-band RGB or 4-band RGB+DSM) via rasterio."""
     with rasterio.open(path) as ds:
         arr = ds.read()
-    if arr.shape[0] >= 3:
+    if arr.shape[0] >= 4:
+        img = np.transpose(arr[:4], (1, 2, 0))
+    elif arr.shape[0] >= 3:
         img = np.transpose(arr[:3], (1, 2, 0))
     else:
         img = np.stack([arr[0]] * 3, axis=-1)
     return np.clip(img, 0, 255).astype(np.uint8)
+
+
+def write_image(path: Path, img: np.ndarray) -> None:
+    """Write HxWxC uint8; use rasterio for 4-band GeoTIFFs, OpenCV for 3-band."""
+    if img.ndim != 3:
+        raise ValueError(f"Expected HxWxC image, got {img.shape}")
+    if img.shape[2] == 4:
+        profile = {
+            "driver": "GTiff",
+            "height": img.shape[0],
+            "width": img.shape[1],
+            "count": 4,
+            "dtype": "uint8",
+            "compress": "deflate",
+        }
+        with rasterio.open(path, "w", **profile) as out:
+            for i in range(4):
+                out.write(img[:, :, i], i + 1)
+        return
+    if img.shape[2] != 3:
+        raise ValueError(f"Expected 3 or 4 channels, got {img.shape[2]}")
+    cv2.imwrite(str(path), cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
 
 
 def transform_image(img: np.ndarray, variant: str) -> np.ndarray:
@@ -96,10 +120,13 @@ def variant_size(variant: str, w: int, h: int) -> tuple[int, int]:
 
 
 def jitter_image(img: np.ndarray, rng: random.Random, amount: float) -> np.ndarray:
+    """Brightness/contrast jitter on RGB only; leave DSM (band 4) unchanged."""
     alpha = 1.0 + rng.uniform(-amount, amount)  # contrast
     beta = rng.uniform(-amount, amount) * 128.0  # brightness
-    out = img.astype(np.float32) * alpha + beta
-    return np.clip(out, 0, 255).astype(np.uint8)
+    out = img.copy()
+    rgb = out[:, :, :3].astype(np.float32) * alpha + beta
+    out[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    return out
 
 
 def transform_annotation(ann: dict, variant: str, w: int, h: int) -> dict:
@@ -166,7 +193,7 @@ def augment_train(
             if jitter > 0 and variant != "orig":
                 out_img = jitter_image(out_img, rng, jitter)
 
-            cv2.imwrite(str(out_img_dir / file_name), cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR))
+            write_image(out_img_dir / file_name, out_img)
 
             new_images.append(
                 {

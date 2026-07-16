@@ -2,8 +2,7 @@
 """Convert a QGIS GPKG annotation layer + GeoTIFF tiles into Detectron2 COCO JSON.
 
 Supports year-based tile layouts under segmentation/tiling/{24,25}/, optional
-ROI clipping, multi-year training in one dataset, and boulder-only mode
-(deposit polygons dropped).
+ROI clipping, multi-year training in one dataset, and boulder-only mode.
 
 Annotation GPKGs can be year-tagged so each year's polygons only label that
 year's tiles (important if footprints ever overlap):
@@ -15,8 +14,14 @@ baked-in copy of that file). Override with ``--tiles-used``.
 
 Class attribute handling:
   - numeric 0 / missing / string "Boulder"  -> Boulder (COCO category 1)
-  - numeric 1 / string containing "deposit" -> BoulderDeposit (dropped when
-    --boulder-only is set, which is the default)
+  - numeric 1 / string containing "deposit" -> BoulderDeposit
+
+With ``--boulder-only`` (default), deposits and Boulder polygons smaller than
+``--min-area-m2`` are kept as COCO ``iscrowd=1`` ignore regions (same Boulder
+category). Train with ``train_boulder_local.py``, which treats those crowds as
+neither positives nor negatives. Use ``--no-boulder-only`` for a trainable
+two-class dataset (deposits as category 2; small boulders still become crowds
+when ``--min-area-m2`` > 0).
 
 Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
@@ -448,11 +453,16 @@ def load_annotations(
 
     ``year`` tags features so they only label tiles from that ortho year.
     ``None`` means the feature may apply to any selected year (merged GPKG).
+
+    ``boulder_only`` no longer drops deposits; they are kept and emitted as
+    ``iscrowd=1`` later in ``convert_tile``. The flag is retained for call-site
+    compatibility / logging.
     """
+    del boulder_only  # deposits are loaded; crowding happens at convert time
     kwargs = {"layer": layer} if layer else {}
     feats: list[tuple] = []
     unknown_class = 0
-    dropped_deposit = 0
+    n_deposit = 0
     skipped_null_geom = 0
     skipped_bad_geom = 0
     with fiona.open(gpkg_path, **kwargs) as src:
@@ -479,9 +489,8 @@ def load_annotations(
             if raw is None:
                 unknown_class += 1
             cls = parse_class_value(raw)
-            if boulder_only and cls == 1:
-                dropped_deposit += 1
-                continue
+            if cls == 1:
+                n_deposit += 1
             feats.append((geom, cls, year))
     tag = f" year={year}" if year is not None else " year=any"
     if skipped_null_geom:
@@ -499,10 +508,10 @@ def load_annotations(
             f"WARNING: {unknown_class} feature(s) in {gpkg_path.name} missing "
             f"'{class_field}', treated as Boulder (0) [{tag.strip()}]"
         )
-    if dropped_deposit:
+    if n_deposit:
         print(
-            f"Dropped {dropped_deposit} BoulderDeposit polygon(s) from "
-            f"{gpkg_path.name} (--boulder-only) [{tag.strip()}]"
+            f"Loaded {n_deposit} BoulderDeposit polygon(s) from "
+            f"{gpkg_path.name} (crowd-ignore when --boulder-only) [{tag.strip()}]"
         )
     print(f"Loaded {len(feats)} features from {gpkg_path} [{tag.strip()}]")
     return feats
@@ -676,7 +685,8 @@ def convert_tile(
 
     annotations: list[dict] = []
     ann_id = ann_start_id
-    per_class = {1: 0, 2: 0}
+    # keys: trainable boulder, crowd-ignored (deposit/small), trainable deposit
+    per_class = {"boulder": 0, "crowd": 0, "deposit": 0}
     for item in feats:
         geom, cls = item[0], item[1]
         feat_year = item[2] if len(item) > 2 else None
@@ -690,9 +700,23 @@ def convert_tile(
             clipped = clipped.intersection(roi)
             if clipped.is_empty:
                 continue
-        # Size filter on Boulders only; deposits kept when not boulder-only.
-        if min_area_m2 > 0 and cls == 0 and clipped.area < min_area_m2:
-            continue
+
+        # Decide crowd vs trainable before tile clip (area filter uses map units).
+        is_crowd = 0
+        ignore_reason = None
+        if cls == 1 and boulder_only:
+            # Single-class training: deposits become ignore regions.
+            is_crowd = 1
+            ignore_reason = "deposit"
+            category_id = 1
+        elif cls == 1:
+            category_id = 2
+        else:
+            category_id = 1
+            if min_area_m2 > 0 and clipped.area < min_area_m2:
+                is_crowd = 1
+                ignore_reason = "small"
+
         clipped = clipped.intersection(tile_poly)
         for poly in polygons_of(clipped):
             seg = ring_to_seg(poly.exterior.coords, inv_transform)
@@ -701,10 +725,9 @@ def convert_tile(
             area = poly_area(seg)
             if area <= 0:
                 continue
-            if boulder_only:
-                category_id = 1
-            else:
-                category_id = min(max(cls, 0), 1) + 1
+            attrs = {"occluded": False}
+            if ignore_reason is not None:
+                attrs["ignore_reason"] = ignore_reason
             annotations.append(
                 {
                     "id": ann_id,
@@ -713,11 +736,16 @@ def convert_tile(
                     "segmentation": [seg],
                     "area": area,
                     "bbox": bbox_from_seg(seg),
-                    "iscrowd": 0,
-                    "attributes": {"occluded": False},
+                    "iscrowd": is_crowd,
+                    "attributes": attrs,
                 }
             )
-            per_class[category_id] += 1
+            if is_crowd:
+                per_class["crowd"] += 1
+            elif category_id == 2:
+                per_class["deposit"] += 1
+            else:
+                per_class["boulder"] += 1
             ann_id += 1
 
     return image_info, annotations, ann_id, per_class
@@ -740,7 +768,7 @@ def build_split(
     annotations: list[dict] = []
     image_id = 1
     ann_id = 1
-    per_class_total = {1: 0, 2: 0}
+    per_class_total = {"boulder": 0, "crowd": 0, "deposit": 0}
     categories = CATEGORIES_ONE if boulder_only else CATEGORIES_TWO
     years_used: set[int] = set()
 
@@ -776,10 +804,11 @@ def build_split(
             "date_created": "",
             "description": (
                 f"Boulder training split: {split_name} "
-                f"(years={sorted(years_used)})"
+                f"(years={sorted(years_used)}; "
+                f"crowd-ignore deposits/small when boulder-only)"
             ),
             "url": "",
-            "version": "3.0",
+            "version": "3.1",
             "year": "2026",
         },
         "categories": categories,
@@ -794,14 +823,17 @@ def build_split(
     }[split_name]
     out_json = output_dir / ann_name
     out_json.write_text(json.dumps(coco))
+    n_pos = per_class_total["boulder"] + per_class_total["deposit"]
     return {
         "split": split_name,
         "years": sorted(years_used),
         "tiles": tile_keys,
         "images": len(images),
         "annotations": len(annotations),
-        "boulders": per_class_total[1],
-        "deposits": per_class_total[2],
+        "boulders": per_class_total["boulder"],
+        "deposits": per_class_total["deposit"],
+        "crowd_ignore": per_class_total["crowd"],
+        "trainable": n_pos,
         "json": str(out_json),
         "image_dir": str(split_image_dir),
     }
@@ -999,13 +1031,20 @@ def main() -> None:
         "--min-area-m2",
         type=float,
         default=0.0,
-        help="Drop Boulder polygons smaller than this in m2 (whole ROI-clipped geometry). 0 = no filter.",
+        help=(
+            "Boulder polygons smaller than this (m2, ROI-clipped geom) become "
+            "COCO iscrowd=1 ignore regions instead of trainable GT. 0 = off."
+        ),
     )
     parser.add_argument(
         "--boulder-only",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop BoulderDeposit polygons and emit a 1-class COCO dataset (default: on).",
+        help=(
+            "Emit a 1-class COCO dataset; BoulderDeposit polygons become "
+            "iscrowd=1 ignore regions (default: on). Use --no-boulder-only for "
+            "trainable deposits as category 2."
+        ),
     )
     parser.add_argument("--train-tiles", type=str, default=None)
     parser.add_argument("--valid-tiles", type=str, default=None)
@@ -1075,7 +1114,11 @@ def main() -> None:
         )
     n_boulder = sum(1 for item in feats if item[1] == 0)
     n_deposit = sum(1 for item in feats if item[1] == 1)
-    mode = "boulder-only" if args.boulder_only else "two-class"
+    mode = (
+        "boulder-only + crowd-ignore deposits/small"
+        if args.boulder_only
+        else "two-class (small boulders still crowd-ignored if --min-area-m2 > 0)"
+    )
     src_desc = ", ".join(
         f"{p.name}:{y if y is not None else 'any'}" for p, y in gpkg_specs
     )

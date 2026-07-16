@@ -13,12 +13,14 @@ Files to copy over for the current (both-years boulder-only) training input:
 
 | File | Purpose |
 |------|---------|
-| `segmentation/annotations/july13_24.gpkg` | 2024 annotations (preferred) |
-| `segmentation/annotations/july13_25.gpkg` | 2025 annotations (preferred) |
-| `segmentation/annotations/july9_input.gpkg` | Legacy merged fallback if July 13 files are absent |
+| `segmentation/annotations/july14_24.gpkg` | Latest 2024 annotations (preferred) |
+| `segmentation/annotations/july14_25.gpkg` | Latest 2025 annotations (preferred) |
+| `segmentation/annotations/tiles_used.txt` | Annotated tile ranges (source of truth) |
+| `segmentation/annotations/july9_input.gpkg` | Legacy merged fallback if July 14/13 files are absent |
 | `segmentation/tiling/24/*.tif` | 2024 ortho tiles |
 | `segmentation/tiling/25/*.tif` | 2025 ortho tiles |
-| `segmentation/annotations/tiles_used.txt` | Annotated tile ranges (source of truth) |
+| `2024/Sites1and2_2024_DSM_30mm.tif` | Optional: for RGB+DSM 4-band training |
+| `2025/25IniSouthDSM.tif` | Optional: for RGB+DSM 4-band training |
 
 ---
 
@@ -86,9 +88,9 @@ Run from the project root. Tiles live under `segmentation\tiling\24\` and
 polys only label 24 tiles). ROI clipping is off by default.
 
 ```bat
-:: Step 1 - per-year GPKGs + both ROIs + 24/25 tiles -> 1-class COCO (~199 tiles).
-::   --years 24,25 is the default. --boulder-only (default) drops deposits.
-::   Defaults: july13_24.gpkg:24 + july13_25.gpkg:25 when present.
+:: Step 1 - per-year GPKGs + tiles_used.txt -> 1-class COCO (~199 tiles).
+::   --years 24,25 is the default. --boulder-only (default) keeps deposits/sub-threshold boulders as iscrowd ignore regions.
+::   Defaults: july14_24.gpkg:24 + july14_25.gpkg:25 when present.
 ::   ROI off by default; pass --roi path to enable. Explicit GPKGs: --gpkg a.gpkg:24,b.gpkg:25
 python BoulderCalculator\scripts\gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation\coco_dataset_both --min-area-m2 1.0
 
@@ -107,14 +109,31 @@ python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco
 
 Notes:
 
-- Defaults for `--years 24,25`: per-year GPKGs `july13_24.gpkg` +
-  `july13_25.gpkg` (year-tagged; fall back to merged `july9_input.gpkg`),
+- Defaults for `--years 24,25`: per-year GPKGs `july14_24.gpkg` +
+  `july14_25.gpkg` (year-tagged; fall back to July 13, then merged `july9_input.gpkg`),
   tile list from `annotations/tiles_used.txt`. ROI clipping is off by default
   (pass `--roi path` to enable). Single-year: `--years 24` or `--years 25`.
 - Copied tile filenames are year-prefixed (`24_...tif`, `25_...tif`) so the
   two years never collide in one dataset folder.
 - Hold-outs are geographic blocks (~27 valid / 42 test) with a buffer of excluded tiles so footprints do not leak across train/valid/test (including cross-year overlaps).
 - Inference uses `--class-names "Boulder"` (single class).
+
+## 2b. Optional — RGB+DSM 4-band training
+
+Stack the year DSM onto each ortho tile (bands R,G,B,DSM) and train with
+`--four-band`. Requires the DSM GeoTIFFs listed above.
+
+```bat
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 24
+python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 25
+python BoulderCalculator\scripts\build_coco_rgb_dsm.py --source-coco segmentation\coco_dataset_both --tile-dirs segmentation\tiling_rgb_dsm_24 segmentation\tiling_rgb_dsm_25 --output-dir segmentation\coco_dataset_rgb_dsm
+python BoulderCalculator\scripts\augment_coco_dataset.py --input-dir segmentation\coco_dataset_rgb_dsm --output-dir segmentation\coco_dataset_rgb_dsm_aug --jitter 0.15
+python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentation\coco_dataset_rgb_dsm_aug --output-dir segmentation\training_run_rgb_dsm --four-band --max-iter 5000 --batch-size 2 --num-workers 4 --device cuda
+python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_rgb_dsm\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_rgb_dsm\model_final.pth --gt-json segmentation\coco_dataset_rgb_dsm\testing_annotations.json --output-dir segmentation\visualizations\test_inference_rgb_dsm --score-thresh 0.4 --device cuda --four-band --class-names "Boulder"
+```
+
+Pass `--four-band` for both train and inference. Do not mix 3-band and 4-band
+checkpoints/images. See `README_PORTABLE.md` Step 3b for DSM modes and smoke-test flags.
 
 ## 3. Troubleshooting
 
@@ -126,3 +145,4 @@ Notes:
 | Out of memory | `--batch-size 1`, or lower `ROI_HEADS.BATCH_SIZE_PER_IMAGE` in the train script |
 | `FileNotFoundError` on tile | Confirm tiles are under `segmentation\tiling\24\` and `25\` with the expected filename patterns |
 | Polygons shifted in QA overlays | Confirm the GPKG CRS is declared correctly (the converter reprojects automatically) |
+| 4-band shape / channel errors | Confirm GeoTIFFs have `count=4` and you passed `--four-band` on train and infer |
