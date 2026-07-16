@@ -28,9 +28,9 @@ from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.datasets import register_coco_instances
 from detectron2.engine import DefaultTrainer
-from detectron2.evaluation import COCOEvaluator
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from coco_eval_with_recall import BoulderCOCOEvaluator  # noqa: E402
 from crowd_ignore import (  # noqa: E402
     CrowdAwareDatasetMapper,
     GeneralizedRCNNWithIgnore,
@@ -97,7 +97,7 @@ class BoulderTrainer(DefaultTrainer):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "eval")
         os.makedirs(output_folder, exist_ok=True)
-        return COCOEvaluator(dataset_name, cfg, False, output_folder)
+        return BoulderCOCOEvaluator(dataset_name, cfg, False, output_folder)
 
     @classmethod
     def build_train_loader(cls, cfg):

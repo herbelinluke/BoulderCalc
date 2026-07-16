@@ -380,6 +380,11 @@ def main() -> None:
         summaries.append(summary)
         print(json.dumps(summary, indent=2))
 
+    tp = sum(s["true_positives"] for s in summaries)
+    fp = sum(s["false_positives"] for s in summaries)
+    fn = sum(s["false_negatives"] for s in summaries)
+    precision = tp / (tp + fp) if (tp + fp) else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
     report = {
         "gt_json": str(args.gt_json),
         "predictions_dir": str(args.predictions_dir),
@@ -389,9 +394,11 @@ def main() -> None:
         "totals": {
             "ground_truth": sum(s["ground_truth_count"] for s in summaries),
             "predictions": sum(s["prediction_count"] for s in summaries),
-            "true_positives": sum(s["true_positives"] for s in summaries),
-            "false_positives": sum(s["false_positives"] for s in summaries),
-            "false_negatives": sum(s["false_negatives"] for s in summaries),
+            "true_positives": tp,
+            "false_positives": fp,
+            "false_negatives": fn,
+            "precision": round(precision, 4),
+            "recall": round(recall, 4),
         },
     }
     report_path = args.output_dir / "error_analysis_summary.json"
