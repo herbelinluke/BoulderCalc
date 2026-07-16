@@ -5,10 +5,16 @@ The paper's training notebook notes "datasets have already been augmented" and
 uses a NonAugmentationsTrainer -- i.e. augmentation was applied to the dataset
 itself before training, not on the fly. This script reproduces that: it reads a
 COCO dataset dir (as produced by gpkg_to_coco.py), applies deterministic
-geometric variants (flips / right-angle rotations) plus optional random
-brightness/contrast jitter to the TRAIN split, transforms the polygon
-annotations exactly, and writes a new dataset dir. Valid/test splits are
-copied through unchanged.
+geometric variants (flips / right-angle rotations) plus optional coastal
+photometric jitter to the TRAIN split, transforms the polygon annotations
+exactly, and writes a new dataset dir. Valid/test splits are copied through
+unchanged.
+
+Online training (``train_boulder_local.py``) additionally applies full-circle
+rotation, scale jitter, blur, noise, and synthetic shadows via
+``boulder_augmentations.py`` for both the RGB crowd-ignore and RGB+DSM paths.
+Use this offline script for exact dihedral expansion; use online augs for the
+lossy / continuous transforms.
 
 Example:
     python BoulderCalculator/scripts/augment_coco_dataset.py \
@@ -119,14 +125,96 @@ def variant_size(variant: str, w: int, h: int) -> tuple[int, int]:
     return w, h
 
 
-def jitter_image(img: np.ndarray, rng: random.Random, amount: float) -> np.ndarray:
-    """Brightness/contrast jitter on RGB only; leave DSM (band 4) unchanged."""
+def _clip_u8(arr: np.ndarray) -> np.ndarray:
+    return np.clip(arr, 0, 255).astype(np.uint8)
+
+
+def _apply_rgb_only(img: np.ndarray, rgb: np.ndarray) -> np.ndarray:
+    out = img.copy()
+    out[:, :, :3] = rgb
+    return out
+
+
+def photometric_jitter(
+    img: np.ndarray,
+    rng: random.Random,
+    amount: float,
+    *,
+    hue_delta: float = 0.04,
+    saturation: float = 0.2,
+    noise_std: float = 10.0,
+    blur_prob: float = 0.35,
+    shadow_prob: float = 0.4,
+) -> np.ndarray:
+    """Coastal photometric suite on RGB only; leave DSM (band 4) unchanged.
+
+    ``amount`` scales brightness/contrast strength (e.g. 0.15–0.25). Hue /
+    saturation / noise / blur / shadow use the dedicated kwargs (mild defaults).
+    """
+    if amount <= 0:
+        return img
+
+    out = img.copy()
+    rgb = out[:, :, :3].astype(np.float32)
+
+    # Brightness / contrast (moderate; cloud-cover variability).
     alpha = 1.0 + rng.uniform(-amount, amount)  # contrast
     beta = rng.uniform(-amount, amount) * 128.0  # brightness
-    out = img.copy()
-    rgb = out[:, :, :3].astype(np.float32) * alpha + beta
-    out[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
-    return out
+    mean = rgb.mean(axis=(0, 1), keepdims=True)
+    rgb = (rgb - mean) * alpha + mean + beta
+
+    # Mild hue / saturation in HSV (OpenCV H in [0, 180]).
+    bgr_u8 = _clip_u8(cv2.cvtColor(_clip_u8(rgb), cv2.COLOR_RGB2BGR))
+    hsv = cv2.cvtColor(bgr_u8, cv2.COLOR_BGR2HSV).astype(np.float32)
+    hsv[:, :, 0] = (hsv[:, :, 0] + rng.uniform(-hue_delta, hue_delta) * 180.0) % 180.0
+    hsv[:, :, 1] = np.clip(
+        hsv[:, :, 1] * (1.0 + rng.uniform(-saturation, saturation)), 0, 255
+    )
+    rgb = cv2.cvtColor(_clip_u8(hsv), cv2.COLOR_HSV2BGR)
+    rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB).astype(np.float32)
+
+    # Gaussian noise (sensor / session floors).
+    if noise_std > 0:
+        std = rng.uniform(0.0, noise_std)
+        if std > 1e-3:
+            rgb = rgb + np.random.default_rng(rng.randint(0, 2**31 - 1)).normal(
+                0.0, std, size=rgb.shape
+            )
+
+    rgb_u8 = _clip_u8(rgb)
+
+    # Slight motion or defocus blur.
+    if rng.random() < blur_prob:
+        k = rng.choice([3, 5, 7])
+        if rng.random() < 0.5:
+            angle = rng.uniform(0.0, 180.0)
+            kernel = np.zeros((k, k), dtype=np.float32)
+            kernel[k // 2, :] = 1.0
+            rot = cv2.getRotationMatrix2D((k / 2 - 0.5, k / 2 - 0.5), angle, 1.0)
+            kernel = cv2.warpAffine(kernel, rot, (k, k))
+            kernel /= max(kernel.sum(), 1e-6)
+            rgb_u8 = cv2.filter2D(rgb_u8, -1, kernel)
+        else:
+            rgb_u8 = cv2.GaussianBlur(rgb_u8, (k, k), 0)
+
+    # Synthetic soft shadow (low sun on exposed coastline).
+    if rng.random() < shadow_prob:
+        h, w = rgb_u8.shape[:2]
+        strength = rng.uniform(0.25, 0.55)
+        cx, cy = rng.uniform(0.15 * w, 0.85 * w), rng.uniform(0.15 * h, 0.85 * h)
+        ax, ay = rng.uniform(0.25 * w, 0.7 * w), rng.uniform(0.12 * h, 0.45 * h)
+        angle = rng.uniform(0.0, 180.0)
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        cos_a, sin_a = np.cos(np.deg2rad(angle)), np.sin(np.deg2rad(angle))
+        x, y = xx - cx, yy - cy
+        xr, yr = cos_a * x + sin_a * y, -sin_a * x + cos_a * y
+        r2 = (xr / max(ax, 1.0)) ** 2 + (yr / max(ay, 1.0)) ** 2
+        mask = np.clip(1.0 - r2, 0.0, 1.0)
+        mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=max(ax, ay) * 0.08)
+        shade = (1.0 - strength * mask).astype(np.float32)
+        rgb_u8 = _clip_u8(rgb_u8.astype(np.float32) * shade[:, :, None])
+
+    return _apply_rgb_only(out, rgb_u8)
 
 
 def transform_annotation(ann: dict, variant: str, w: int, h: int) -> dict:
@@ -191,7 +279,7 @@ def augment_train(
                 file_name = f"{stem}_{variant}{suffix}"
                 vw, vh = variant_size(variant, w, h)
             if jitter > 0 and variant != "orig":
-                out_img = jitter_image(out_img, rng, jitter)
+                out_img = photometric_jitter(out_img, rng, jitter)
 
             write_image(out_img_dir / file_name, out_img)
 
@@ -228,6 +316,15 @@ def augment_train(
         "augmented_annotations": len(new_annotations),
         "variants": ["orig"] + variants,
         "jitter": jitter,
+        "photometric": [
+            "brightness_contrast",
+            "hue_saturation",
+            "gaussian_noise",
+            "motion_or_defocus_blur",
+            "synthetic_shadow",
+        ]
+        if jitter > 0
+        else [],
     }
 
 
@@ -258,7 +355,11 @@ def main() -> None:
         "--jitter",
         type=float,
         default=0.0,
-        help="Random brightness/contrast jitter fraction applied to augmented copies (e.g. 0.15). 0 = off.",
+        help=(
+            "Photometric strength for augmented copies (e.g. 0.15). Enables "
+            "brightness/contrast plus mild hue/sat, noise, blur, and shadows. "
+            "0 = off. DSM band is never modified."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

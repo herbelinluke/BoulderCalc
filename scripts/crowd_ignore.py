@@ -141,7 +141,32 @@ def transform_annotations_with_ignore(
 
 
 class CrowdAwareDatasetMapper(DatasetMapper):
-    """Standard DatasetMapper that preserves ``iscrowd`` as ``ignore_boxes``."""
+    """Standard DatasetMapper that preserves ``iscrowd`` as ``ignore_boxes``.
+
+    Training uses the shared boulder aug stack (full-circle rotation, flips,
+    scale jitter, coastal photometric) from ``boulder_augmentations`` so both
+    the RGB crowd-ignore path and RGB+DSM ``FourBandDatasetMapper`` stay aligned.
+    """
+
+    @classmethod
+    def from_config(cls, cfg, is_train: bool = True):
+        ret = super().from_config(cfg, is_train)
+        # Rich augs are on by default; set INPUT.BOULDER_RICH_AUG=False to fall
+        # back to Detectron2's ResizeShortestEdge (+ optional crop/flip).
+        use_rich = bool(getattr(cfg.INPUT, "BOULDER_RICH_AUG", True))
+        if use_rich:
+            from boulder_augmentations import build_boulder_test_augs, build_boulder_train_augs
+
+            image_size = int(cfg.INPUT.MAX_SIZE_TRAIN if is_train else cfg.INPUT.MAX_SIZE_TEST)
+            if is_train:
+                ret["augmentations"] = build_boulder_train_augs(
+                    image_size,
+                    scale_min=float(getattr(cfg.INPUT, "BOULDER_SCALE_MIN", 0.5)),
+                    scale_max=float(getattr(cfg.INPUT, "BOULDER_SCALE_MAX", 1.5)),
+                )
+            else:
+                ret["augmentations"] = build_boulder_test_augs(image_size)
+        return ret
 
     def _transform_annotations(self, dataset_dict, transforms, image_shape):
         transform_annotations_with_ignore(self, dataset_dict, transforms, image_shape)

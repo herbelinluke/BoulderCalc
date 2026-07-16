@@ -177,6 +177,13 @@ def build_cfg(
     cfg.INPUT.MAX_SIZE_TEST = image_size
     cfg.INPUT.MIN_SIZE_TEST = image_size
     cfg.INPUT.FORMAT = "BGR"
+    # Flips / resize live in boulder_augmentations (both flips + full rotation).
+    cfg.INPUT.RANDOM_FLIP = "none"
+    # Shared rich aug stack for crowd-ignore and --four-band mappers.
+    cfg.INPUT.set_new_allowed(True)
+    cfg.INPUT.BOULDER_RICH_AUG = True
+    cfg.INPUT.BOULDER_SCALE_MIN = 0.5
+    cfg.INPUT.BOULDER_SCALE_MAX = 1.5
 
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
         "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
@@ -280,6 +287,14 @@ def main() -> None:
             "Use on low-VRAM GPUs when eval spikes memory or stalls."
         ),
     )
+    parser.add_argument(
+        "--no-rich-aug",
+        action="store_true",
+        help=(
+            "Disable the coastal aug stack (full rotation, both flips, scale "
+            "jitter, photometric). Falls back to Detectron2 resize-only train augs."
+        ),
+    )
     args = parser.parse_args()
 
     BoulderTrainer.four_band = args.four_band
@@ -296,6 +311,9 @@ def main() -> None:
         image_size=args.image_size,
         eval_during_train=not args.no_eval,
     )
+    if args.no_rich_aug:
+        cfg.INPUT.BOULDER_RICH_AUG = False
+        cfg.INPUT.RANDOM_FLIP = "horizontal"
     if args.weights is not None:
         cfg.MODEL.WEIGHTS = str(args.weights)
 
