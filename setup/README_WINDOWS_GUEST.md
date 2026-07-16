@@ -5,6 +5,11 @@ no admin rights, so the registry `LongPathsEnabled` fix is unavailable and the
 260-character path limit is in force. Miniconda + developer tools are assumed
 to be installed already. The strategy is simple: **keep every path short**.
 
+> **Canonical workflow & flags:** this guide covers the guest/no-admin setup
+> plus the core commands. For the complete training/inference/evaluation (incl.
+> recall) and matching reference with every CLI flag, see
+> [`../MODEL_TRAINING.md`](../MODEL_TRAINING.md).
+
 > **Guest-profile warning:** true Windows Guest accounts may wipe the user
 > profile at logout. Keep the project, environment, and especially
 > `training_run*/model_final.pth` outputs on a USB / second drive (or

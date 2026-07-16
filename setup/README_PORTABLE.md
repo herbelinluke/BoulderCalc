@@ -2,8 +2,12 @@
 
 Run Detectron2 boulder training on another machine using files copied to a USB stick.
 
-> **Windows users:** this file is the general pipeline reference. For
-> step-by-step Windows setup use:
+> **Canonical workflow & flags:** for the full training/inference/evaluation
+> (incl. recall) and matching reference — with copy-paste commands and every
+> CLI flag — see [`../MODEL_TRAINING.md`](../MODEL_TRAINING.md). This file covers
+> **portable/Linux environment setup** plus a self-contained command walkthrough.
+>
+> **Windows users:** for step-by-step Windows setup use:
 >
 > - `README_WINDOWS.md` — normal or admin account
 > - `README_WINDOWS_GUEST.md` — guest / restricted account (miniconda, no

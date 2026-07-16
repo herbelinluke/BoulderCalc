@@ -7,11 +7,20 @@ This repository provides Python code for training and inference of AI models for
 
 # 1. Code usage
 ## Python code
-The deep-learning training and inference code is provided as Jupyter Notebook files.
-Code specific to Detectron2 is stored in the detectron2 directory.
-1. Open the target notebook file.
-2. Extract and load the model weight file.
-3. Load the target images.
+The deep-learning workflow runs from command-line scripts in `BoulderCalculator/scripts/`
+(the notebooks under `Detectron2/` are legacy reference).
+
+**Start here:** [`MODEL_TRAINING.md`](MODEL_TRAINING.md) is the canonical guide for
+building datasets, training (RGB and RGB+DSM), inference, evaluation (including
+recall metrics), and boulder matching — with copy-paste commands and a full flag
+reference.
+
+Environment/platform setup:
+- Linux / portable USB: [`setup/README_PORTABLE.md`](setup/README_PORTABLE.md)
+- Windows (normal/admin): [`setup/README_WINDOWS.md`](setup/README_WINDOWS.md)
+- Windows (guest / no admin): [`setup/README_WINDOWS_GUEST.md`](setup/README_WINDOWS_GUEST.md)
+
+Survey-to-survey boulder matching: [`Matching/README.md`](Matching/README.md).
 ## Boulder Calculator (Matlab)
 This MATLAB app provides the position, size, and volume of boulders based on contours detected by Detectron2.
 1. Detect boulder contours using Detectron2 and save the results as a JSON file in COCO format with the accompanying sub-app (Python code).

@@ -4,6 +4,11 @@ For a Windows machine where you have a normal user (or admin) account and can
 install software the usual way. If you are stuck on a **guest account** or
 cannot enable long paths, use `README_WINDOWS_GUEST.md` instead.
 
+> **Canonical workflow & flags:** this guide covers Windows setup plus the core
+> commands. For the complete training/inference/evaluation (incl. recall) and
+> matching reference with every CLI flag, see
+> [`../MODEL_TRAINING.md`](../MODEL_TRAINING.md).
+
 Assumes the machine already has:
 
 - The BoulderCalculator repo (`git clone` / `git pull`)

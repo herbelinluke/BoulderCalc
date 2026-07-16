@@ -1,5 +1,10 @@
 # Boulder Matching Module
 
+> For the end-to-end model pipeline (dataset build, training, inference,
+> evaluation) that produces the polygons matched here, see the canonical guide
+> [`../MODEL_TRAINING.md`](../MODEL_TRAINING.md). Run the commands below from
+> this `Matching/` directory.
+
 ## Overview
 
 The **Boulder Matching Module** matches segmented boulder polygons
