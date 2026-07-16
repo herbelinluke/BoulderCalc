@@ -13,8 +13,12 @@ from detectron2.config import get_cfg
 from detectron2.data import DatasetCatalog, MetadataCatalog
 from detectron2.data.datasets import register_coco_instances
 from detectron2.engine import DefaultTrainer, default_argument_parser, default_setup, hooks, launch
-from detectron2.evaluation import COCOEvaluator
 from detectron2 import model_zoo
+
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from coco_eval_with_recall import BoulderCOCOEvaluator  # noqa: E402
 
 
 class BoulderTrainer(DefaultTrainer):
@@ -23,7 +27,7 @@ class BoulderTrainer(DefaultTrainer):
         if output_folder is None:
             output_folder = os.path.join(cfg.OUTPUT_DIR, "eval")
         os.makedirs(output_folder, exist_ok=True)
-        return COCOEvaluator(dataset_name, cfg, False, output_folder)
+        return BoulderCOCOEvaluator(dataset_name, cfg, False, output_folder)
 
 
 def dataset_class_names(base_path: Path) -> list[str]:
