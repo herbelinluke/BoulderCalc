@@ -35,6 +35,30 @@ def compute_basic_attributes(gdf):
     return gdf
 
 
+def _same_horizontal_crs(gdf_crs, raster_crs) -> bool:
+    """Treat EPSG:25829 and compound UTM29N+height CRS as interchangeable for XY ops."""
+    if gdf_crs == raster_crs:
+        return True
+    gdf_epsg = None
+    try:
+        gdf_epsg = gdf_crs.to_epsg() if hasattr(gdf_crs, "to_epsg") else None
+        rast_epsg = raster_crs.to_epsg() if hasattr(raster_crs, "to_epsg") else None
+        if gdf_epsg and rast_epsg and gdf_epsg == rast_epsg:
+            return True
+    except Exception:
+        pass
+    # Compound DSM CRS often has no single EPSG; compare projected WKT fragment.
+    gdf_s = str(gdf_crs)
+    rast_s = str(raster_crs)
+    if "25829" in gdf_s and ("UTM_zone_29" in rast_s or "central_meridian\",-9" in rast_s.replace(" ", "")):
+        return True
+    return bool(
+        gdf_epsg == 25829
+        and "Transverse_Mercator" in rast_s
+        and "central_meridian\",-9" in rast_s.replace(" ", "")
+    )
+
+
 def estimate_volume_from_dsm(gdf, dsm_path, buffer_distance=0.5):
     gdf = gdf.copy()
 
@@ -43,8 +67,16 @@ def estimate_volume_from_dsm(gdf, dsm_path, buffer_distance=0.5):
     max_heights = []
 
     with rasterio.open(dsm_path) as src:
-        if gdf.crs != src.crs:
-            gdf = gdf.to_crs(src.crs)
+        if not _same_horizontal_crs(gdf.crs, src.crs):
+            # Prefer horizontal EPSG when the raster CRS is compound (XY + height).
+            target = src.crs
+            try:
+                epsg = src.crs.to_epsg()
+                if epsg:
+                    target = f"EPSG:{epsg}"
+            except Exception:
+                pass
+            gdf = gdf.to_crs(target)
 
         pixel_area = abs(src.res[0] * src.res[1])
 
