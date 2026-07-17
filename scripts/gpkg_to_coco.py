@@ -108,7 +108,7 @@ def parse_col_spec(spec: str) -> list[int]:
 
 
 def parse_tiles_used_text(text: str) -> dict[int, list[str]]:
-    """Parse tiles_used.txt into {24: ['3_36', ...], 25: [...]}."""
+    """Parse tiles_used.txt into {24: [...], 25: [...]}."""
     by_year: dict[int, list[str]] = {24: [], 25: []}
     year: int | None = None
     for raw in text.splitlines():
