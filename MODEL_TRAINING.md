@@ -115,7 +115,9 @@ Useful flags: `--gpkg a.gpkg:24,b.gpkg:25` (override annotations),
 `--roi path` (re‑enable ROI clipping; off by default), `--tiles-used path`,
 `--years 24` or `--years 25` (single year),
 `--split-config path.yaml` (alternate geographic hold-outs; see
-[`experiments/geo_splits/`](experiments/geo_splits/)). Full list: `--help`.
+[`experiments/geo_splits/`](experiments/geo_splits/)),
+`--drop-below-min-area` (with `--min-area-m2`: omit small boulders instead of
+`iscrowd=1`). Full list: `--help`.
 
 Sanity‑check the polygons before training:
 
@@ -303,6 +305,7 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 **`scripts/gpkg_to_coco.py`** — GPKG + tiles → COCO.
 `--segmentation-dir`, `--years` (24,25), `--gpkg`, `--roi` (off),
 `--tiles-used`, `--output-dir`, `--min-area-m2` (0.0),
+`--drop-below-min-area` (omit small boulders instead of iscrowd),
 `--boulder-only`/`--no-boulder-only` (on), `--layer`, `--class-field` (Class),
 `--train-tiles`/`--valid-tiles`/`--test-tiles`,
 `--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline).
@@ -311,6 +314,9 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 `--input-dir`*, `--output-dir`*, `--variants` (full dihedral 8×), `--jitter`
 (0.0), `--seed` (42), `--splits` (default `train`; use `train,valid,test` to
 expand every split).
+
+**`scripts/materialize_geo_split_coco.py`** — filter a shared offline-aug pool
+into train/valid/test for one `--split-config` (symlinks by default).
 
 **`scripts/build_rgb_dsm_tiles.py`** — warp DSM onto ortho tiles.
 `--year`* (24|25), `--dsm` (year default), `--ortho-dir` (segmentation/tiling),

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Smoke-test every geo-split setup (RGB+DSM, offline+jitter, no online augs).
 
-Builds COCO → 4-band remap → offline aug (all splits) → short Detectron2 train
-for each YAML under experiments/geo_splits/. Fails fast with the setup id on error.
+Builds a **shared** all-tiles RGB+DSM offline-aug pool once, then materializes
+each setup's train/valid/test (symlinks into the pool) and runs a short train.
+Fails fast with the setup id on error.
 
 Run from the project root (parent of BoulderCalculator/ and segmentation/):
 
   python BoulderCalculator/experiments/geo_splits/smoke_geo_splits.py
   python BoulderCalculator/experiments/geo_splits/smoke_geo_splits.py --setups baseline,sporadic_aligned
   python BoulderCalculator/experiments/geo_splits/smoke_geo_splits.py --skip-train
-  python BoulderCalculator/experiments/geo_splits/smoke_geo_splits.py --build-rgb-dsm-tiles
+  python BoulderCalculator/experiments/geo_splits/smoke_geo_splits.py --drop-below-min-area
 
 Full weekend training uses run_geo_weekend.bat / --mode weekend.
 """
@@ -36,13 +37,16 @@ GEO_SPLITS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GEO_SPLITS_DIR.parents[1]  # BoulderCalculator/
 SCRIPTS = REPO_ROOT / "scripts"
 
+POOL_RGB = "coco_geo_all"
+POOL_4B = "coco_geo_all_rgb_dsm"
+POOL_AUG = "coco_geo_all_rgb_dsm_aug"
+
 
 def project_root_from_cwd() -> Path:
     """Prefer cwd if it contains BoulderCalculator/ + segmentation/."""
     cwd = Path.cwd()
     if (cwd / "BoulderCalculator").is_dir() and (cwd / "segmentation").is_dir():
         return cwd
-    # Fall back: parent of BoulderCalculator (tamucc/)
     return REPO_ROOT.parent
 
 
@@ -86,7 +90,10 @@ def missing_four_band_names(coco_dir: Path, tile_dirs: list[Path]) -> list[str]:
         "validation_annotations.json",
         "testing_annotations.json",
     ):
-        data = json.loads((coco_dir / ann_name).read_text())
+        path = coco_dir / ann_name
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text())
         for image in data["images"]:
             name = image["file_name"]
             candidates = [name]
@@ -106,7 +113,7 @@ def missing_four_band_names(coco_dir: Path, tile_dirs: list[Path]) -> list[str]:
     return missing
 
 
-def ensure_tiles_for_coco(root: Path, py: str, coco_dir: Path, setup: str) -> None:
+def ensure_tiles_for_coco(root: Path, py: str, coco_dir: Path, label: str) -> None:
     """Build any RGB+DSM tiles referenced by coco_dir that are not on disk yet."""
     tile_24 = root / "segmentation" / "tiling_rgb_dsm_24"
     tile_25 = root / "segmentation" / "tiling_rgb_dsm_25"
@@ -114,10 +121,10 @@ def ensure_tiles_for_coco(root: Path, py: str, coco_dir: Path, setup: str) -> No
     tile_25.mkdir(parents=True, exist_ok=True)
     missing = missing_four_band_names(coco_dir, [tile_24, tile_25])
     if not missing:
-        print(f"[skip] all 4-band tiles present for {setup}")
+        print(f"[skip] all 4-band tiles present for {label}")
         return
     print(
-        f"[{setup}] building {len(missing)} missing RGB+DSM tile(s) via --from-coco",
+        f"[{label}] building {len(missing)} missing RGB+DSM tile(s) via --from-coco",
         flush=True,
     )
     for year in (24, 25):
@@ -130,68 +137,65 @@ def ensure_tiles_for_coco(root: Path, py: str, coco_dir: Path, setup: str) -> No
                 "--from-coco",
                 str(coco_dir),
             ],
-            label=f"{setup}: build_rgb_dsm_tiles year={year} --from-coco",
+            label=f"{label}: build_rgb_dsm_tiles year={year} --from-coco",
         )
     still = missing_four_band_names(coco_dir, [tile_24, tile_25])
     if still:
         sample = ", ".join(still[:5])
         more = f" (+{len(still) - 5} more)" if len(still) > 5 else ""
         raise SystemExit(
-            f"[{setup}] still missing {len(still)} 4-band tile(s) after build: "
+            f"[{label}] still missing {len(still)} 4-band tile(s) after build: "
             f"{sample}{more}. Check DSM files under 2024/ and 2025/."
         )
 
 
-def pipeline_one(
+def build_shared_pool(
     *,
     root: Path,
     py: str,
-    setup: str,
-    max_iter: int,
-    batch_size: int,
-    image_size: int,
-    checkpoint_period: int,
-    eval_period: int,
-    device: str,
-    num_workers: int,
-    skip_train: bool,
-    skip_aug: bool,
     min_area_m2: float,
-) -> None:
-    split_yaml = GEO_SPLITS_DIR / f"{setup}.yaml"
-    if not split_yaml.is_file():
-        raise SystemExit(f"Missing split config: {split_yaml}")
+    drop_below_min_area: bool,
+    skip_aug: bool,
+    force_pool: bool,
+) -> Path:
+    """Build all-tiles RGB(+DSM) COCO and offline-aug once; return train dataset dir."""
+    all_yaml = GEO_SPLITS_DIR / "all_tiles.yaml"
+    if not all_yaml.is_file():
+        raise SystemExit(f"Missing {all_yaml}")
 
-    coco_rgb = root / "segmentation" / f"coco_geo_{setup}"
-    coco_4b = root / "segmentation" / f"coco_geo_{setup}_rgb_dsm"
-    coco_aug = root / "segmentation" / f"coco_geo_{setup}_rgb_dsm_aug"
-    out_dir = root / "segmentation" / f"training_run_geo_{setup}"
-    if max_iter <= 20:
-        out_dir = root / "segmentation" / f"training_run_geo_{setup}_smoke"
+    coco_rgb = root / "segmentation" / POOL_RGB
+    coco_4b = root / "segmentation" / POOL_4B
+    coco_aug = root / "segmentation" / POOL_AUG
+    pool_ready = (coco_aug / "train_annotations.json").is_file()
+    if pool_ready and not force_pool and not skip_aug:
+        print(f"[skip] shared aug pool already present: {coco_aug}")
+        return coco_aug
+    if skip_aug and (coco_4b / "train_annotations.json").is_file() and not force_pool:
+        print(f"[skip] shared 4-band pool present (no aug): {coco_4b}")
+        return coco_4b
 
-    run(
-        [
-            py,
-            str(SCRIPTS / "gpkg_to_coco.py"),
-            "--segmentation-dir",
-            str(root / "segmentation"),
-            "--years",
-            "24,25",
-            "--split-config",
-            str(split_yaml),
-            "--output-dir",
-            str(coco_rgb),
-            "--min-area-m2",
-            str(min_area_m2),
-        ],
-        label=f"{setup}: gpkg_to_coco",
-    )
+    gpkg_cmd = [
+        py,
+        str(SCRIPTS / "gpkg_to_coco.py"),
+        "--segmentation-dir",
+        str(root / "segmentation"),
+        "--years",
+        "24,25",
+        "--split-config",
+        str(all_yaml),
+        "--output-dir",
+        str(coco_rgb),
+        "--min-area-m2",
+        str(min_area_m2),
+    ]
+    if drop_below_min_area:
+        gpkg_cmd.append("--drop-below-min-area")
+    run(gpkg_cmd, label="shared pool: gpkg_to_coco (all_tiles)")
 
-    ensure_tiles_for_coco(root, py, coco_rgb, setup)
+    ensure_tiles_for_coco(root, py, coco_rgb, "shared_pool")
 
     tile_24 = root / "segmentation" / "tiling_rgb_dsm_24"
     tile_25 = root / "segmentation" / "tiling_rgb_dsm_25"
-
     run(
         [
             py,
@@ -204,28 +208,70 @@ def pipeline_one(
             "--output-dir",
             str(coco_4b),
         ],
-        label=f"{setup}: build_coco_rgb_dsm",
+        label="shared pool: build_coco_rgb_dsm",
     )
 
-    if not skip_aug:
-        run(
-            [
-                py,
-                str(SCRIPTS / "augment_coco_dataset.py"),
-                "--input-dir",
-                str(coco_4b),
-                "--output-dir",
-                str(coco_aug),
-                "--splits",
-                "train,valid,test",
-                "--jitter",
-                "0.15",
-            ],
-            label=f"{setup}: augment all splits",
-        )
-        train_dir = coco_aug
-    else:
-        train_dir = coco_4b
+    if skip_aug:
+        return coco_4b
+
+    run(
+        [
+            py,
+            str(SCRIPTS / "augment_coco_dataset.py"),
+            "--input-dir",
+            str(coco_4b),
+            "--output-dir",
+            str(coco_aug),
+            "--splits",
+            "train",
+            "--jitter",
+            "0.15",
+        ],
+        label="shared pool: offline aug (all tiles in train)",
+    )
+    return coco_aug
+
+
+def pipeline_one(
+    *,
+    root: Path,
+    py: str,
+    setup: str,
+    pool_dir: Path,
+    max_iter: int,
+    batch_size: int,
+    image_size: int,
+    checkpoint_period: int,
+    eval_period: int,
+    device: str,
+    num_workers: int,
+    skip_train: bool,
+) -> None:
+    split_yaml = GEO_SPLITS_DIR / f"{setup}.yaml"
+    if not split_yaml.is_file():
+        raise SystemExit(f"Missing split config: {split_yaml}")
+
+    # Thin per-setup dir: JSONs + symlinks into the shared pool images.
+    coco_setup = root / "segmentation" / f"coco_geo_{setup}_from_pool"
+    out_dir = root / "segmentation" / f"training_run_geo_{setup}"
+    if max_iter <= 20:
+        out_dir = root / "segmentation" / f"training_run_geo_{setup}_smoke"
+
+    run(
+        [
+            py,
+            str(SCRIPTS / "materialize_geo_split_coco.py"),
+            "--pool-dir",
+            str(pool_dir),
+            "--split-config",
+            str(split_yaml),
+            "--segmentation-dir",
+            str(root / "segmentation"),
+            "--output-dir",
+            str(coco_setup),
+        ],
+        label=f"{setup}: materialize from shared pool",
+    )
 
     if skip_train:
         print(f"[skip] train for {setup}")
@@ -236,7 +282,7 @@ def pipeline_one(
             py,
             str(SCRIPTS / "train_boulder_local.py"),
             "--dataset-dir",
-            str(train_dir),
+            str(coco_setup),
             "--output-dir",
             str(out_dir),
             "--four-band",
@@ -278,16 +324,26 @@ def main() -> None:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--min-area-m2", type=float, default=1.0)
     parser.add_argument(
+        "--drop-below-min-area",
+        action="store_true",
+        help="Omit boulders below --min-area-m2 instead of iscrowd=1 (pool rebuild).",
+    )
+    parser.add_argument(
         "--build-rgb-dsm-tiles",
         action="store_true",
         help="Build shared tiling_rgb_dsm_24/25 if missing (or rebuild with --force-tiles)",
     )
     parser.add_argument("--force-tiles", action="store_true")
+    parser.add_argument(
+        "--force-pool",
+        action="store_true",
+        help="Rebuild the shared all-tiles COCO + aug pool even if present.",
+    )
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument(
         "--skip-aug",
         action="store_true",
-        help="Skip offline aug (faster path check; not the weekend recipe)",
+        help="Skip offline aug (materialize from unaugmented 4-band pool).",
     )
     parser.add_argument(
         "--python",
@@ -307,6 +363,7 @@ def main() -> None:
     print(f"Python: {py}")
     print(f"Setups: {setups}")
     print(f"Mode: {args.mode}")
+    print(f"drop_below_min_area: {args.drop_below_min_area}")
 
     if args.build_rgb_dsm_tiles or args.force_tiles:
         ensure_rgb_dsm_tiles(root, py, force=args.force_tiles)
@@ -318,6 +375,19 @@ def main() -> None:
         max_iter, batch_size, image_size = 5000, 2, 2000
         checkpoint_period, eval_period = 2000, 500
 
+    # Changing small-boulder policy requires a fresh pool (annotations differ).
+    force_pool = args.force_pool or args.drop_below_min_area
+
+    pool_dir = build_shared_pool(
+        root=root,
+        py=py,
+        min_area_m2=args.min_area_m2,
+        drop_below_min_area=args.drop_below_min_area,
+        skip_aug=args.skip_aug,
+        force_pool=force_pool,
+    )
+    print(f"Shared pool: {pool_dir}")
+
     failed = []
     for setup in setups:
         try:
@@ -325,6 +395,7 @@ def main() -> None:
                 root=root,
                 py=py,
                 setup=setup,
+                pool_dir=pool_dir,
                 max_iter=max_iter,
                 batch_size=batch_size,
                 image_size=image_size,
@@ -333,13 +404,10 @@ def main() -> None:
                 device=args.device,
                 num_workers=args.num_workers,
                 skip_train=args.skip_train,
-                skip_aug=args.skip_aug,
-                min_area_m2=args.min_area_m2,
             )
         except SystemExit as exc:
             print(exc, flush=True)
             failed.append(setup)
-            # Fail fast for smoke; weekend also stops so a bad setup doesn't burn the night
             break
 
     if failed:

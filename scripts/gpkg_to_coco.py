@@ -18,10 +18,11 @@ Class attribute handling:
 
 With ``--boulder-only`` (default), deposits and Boulder polygons smaller than
 ``--min-area-m2`` are kept as COCO ``iscrowd=1`` ignore regions (same Boulder
-category). Train with ``train_boulder_local.py``, which treats those crowds as
-neither positives nor negatives. Use ``--no-boulder-only`` for a trainable
-two-class dataset (deposits as category 2; small boulders still become crowds
-when ``--min-area-m2`` > 0).
+category). Pass ``--drop-below-min-area`` to omit sub-cutoff boulders entirely
+instead of crowding them. Train with ``train_boulder_local.py``, which treats
+crowds as neither positives nor negatives. Use ``--no-boulder-only`` for a
+trainable two-class dataset (deposits as category 2; small boulders still
+become crowds or are dropped when ``--min-area-m2`` > 0).
 
 Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
@@ -75,7 +76,6 @@ _TILES_USED_TEXT = """\
 13:5-13
 
 2024 tiles annotated:
-3:36
 4:44-46
 5:42-46
 6:40-45
@@ -147,7 +147,6 @@ TILES_25 = list(_DEFAULT_TILES[25])
 # EXCLUDED_* tiles abut hold-outs and are dropped from every split (spatial buffer).
 # Blocks: 12 segments along the coast PCA axis; valid={2,8}, test={5,11}.
 VALID_24 = [
-    "3_36",
     "7_38",
     "7_39",
     "8_37",
@@ -772,6 +771,7 @@ def convert_tile(
     min_area_m2: float,
     boulder_only: bool,
     tile_year: int | None = None,
+    drop_below_min_area: bool = False,
 ) -> tuple[dict, list[dict], int, dict]:
     with rasterio.open(image_path) as ds:
         transform = ds.transform
@@ -794,7 +794,7 @@ def convert_tile(
     annotations: list[dict] = []
     ann_id = ann_start_id
     # keys: trainable boulder, crowd-ignored (deposit/small), trainable deposit
-    per_class = {"boulder": 0, "crowd": 0, "deposit": 0}
+    per_class = {"boulder": 0, "crowd": 0, "deposit": 0, "dropped_small": 0}
     for item in feats:
         geom, cls = item[0], item[1]
         feat_year = item[2] if len(item) > 2 else None
@@ -822,6 +822,9 @@ def convert_tile(
         else:
             category_id = 1
             if min_area_m2 > 0 and clipped.area < min_area_m2:
+                if drop_below_min_area:
+                    per_class["dropped_small"] += 1
+                    continue
                 is_crowd = 1
                 ignore_reason = "small"
 
@@ -868,6 +871,7 @@ def build_split(
     roi,
     min_area_m2: float,
     boulder_only: bool,
+    drop_below_min_area: bool = False,
 ) -> dict:
     split_image_dir = output_dir / split_name
     split_image_dir.mkdir(parents=True, exist_ok=True)
@@ -876,7 +880,7 @@ def build_split(
     annotations: list[dict] = []
     image_id = 1
     ann_id = 1
-    per_class_total = {"boulder": 0, "crowd": 0, "deposit": 0}
+    per_class_total = {"boulder": 0, "crowd": 0, "deposit": 0, "dropped_small": 0}
     categories = CATEGORIES_ONE if boulder_only else CATEGORIES_TWO
     years_used: set[int] = set()
 
@@ -897,6 +901,7 @@ def build_split(
             min_area_m2,
             boulder_only,
             tile_year=year,
+            drop_below_min_area=drop_below_min_area,
         )
         image_info["file_name"] = dst_name
         images.append(image_info)
@@ -913,7 +918,10 @@ def build_split(
             "description": (
                 f"Boulder training split: {split_name} "
                 f"(years={sorted(years_used)}; "
-                f"crowd-ignore deposits/small when boulder-only)"
+                f"crowd-ignore deposits"
+                f"{'/small' if not drop_below_min_area else ''}"
+                f"{'; drop small' if drop_below_min_area else ''}"
+                f" when boulder-only)"
             ),
             "url": "",
             "version": "3.1",
@@ -941,6 +949,7 @@ def build_split(
         "boulders": per_class_total["boulder"],
         "deposits": per_class_total["deposit"],
         "crowd_ignore": per_class_total["crowd"],
+        "dropped_small": per_class_total["dropped_small"],
         "trainable": n_pos,
         "json": str(out_json),
         "image_dir": str(split_image_dir),
@@ -1141,7 +1150,16 @@ def main() -> None:
         default=0.0,
         help=(
             "Boulder polygons smaller than this (m2, ROI-clipped geom) become "
-            "COCO iscrowd=1 ignore regions instead of trainable GT. 0 = off."
+            "COCO iscrowd=1 ignore regions instead of trainable GT (unless "
+            "--drop-below-min-area). 0 = off."
+        ),
+    )
+    parser.add_argument(
+        "--drop-below-min-area",
+        action="store_true",
+        help=(
+            "With --min-area-m2 > 0: omit small boulders from the COCO entirely "
+            "instead of emitting them as iscrowd=1. Deposits are unchanged."
         ),
     )
     parser.add_argument(
@@ -1254,10 +1272,16 @@ def main() -> None:
     n_boulder = sum(1 for item in feats if item[1] == 0)
     n_deposit = sum(1 for item in feats if item[1] == 1)
     mode = (
-        "boulder-only + crowd-ignore deposits/small"
+        "boulder-only + crowd-ignore deposits"
         if args.boulder_only
-        else "two-class (small boulders still crowd-ignored if --min-area-m2 > 0)"
+        else "two-class"
     )
+    if args.min_area_m2 > 0:
+        mode += (
+            "; drop small boulders"
+            if args.drop_below_min_area
+            else "; crowd-ignore small boulders"
+        )
     src_desc = ", ".join(
         f"{p.name}:{y if y is not None else 'any'}" for p, y in gpkg_specs
     )
@@ -1305,6 +1329,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
         ),
         build_split(
             "valid",
@@ -1315,6 +1340,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
         ),
         build_split(
             "test",
@@ -1325,6 +1351,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
         ),
     ]
     print(json.dumps(summary, indent=2))

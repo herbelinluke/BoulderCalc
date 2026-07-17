@@ -17,7 +17,7 @@ python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode weeke
 if errorlevel 1 exit /b 1
 
 echo.
-echo === Smoke all setups (short train) before long runs ===
+echo === Smoke all setups (shared pool + short train) before long runs ===
 python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode smoke --device cuda --num-workers 2
 if errorlevel 1 (
   echo Smoke failed — aborting weekend runs.
@@ -25,10 +25,11 @@ if errorlevel 1 (
 )
 
 echo.
-echo === Weekend full training (5000 iters each) ===
+echo === Weekend full training (5000 iters each; reuse shared aug pool) ===
 python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode weekend --device cuda --num-workers 2 %*
 if errorlevel 1 exit /b 1
 
 echo.
 echo Weekend loop finished. Check segmentation\training_run_geo_*\metrics.json
+echo Shared aug pool: segmentation\coco_geo_all_rgb_dsm_aug\
 endlocal

@@ -2,10 +2,12 @@
 
 Branch: **`exp/geo-split-weekend`**
 
-Five geographic train / valid / test setups, trained with **offline dihedral + jitter
-on all splits** and **no online rich augs** (`--no-rich-aug`). Modality is
-**RGB+DSM only** (`--four-band`). Default long runs use **5000** iterations,
-checkpoints every **2000**, validation AP every **500**.
+Five geographic train / valid / test setups, trained with **offline dihedral + jitter**
+on a **shared all-tiles pool** and **no online rich augs** (`--no-rich-aug`).
+Modality is **RGB+DSM only** (`--four-band`). Default long runs use **5000**
+iterations, checkpoints every **2000**, validation AP every **500**.
+
+2024 tile `3_36` is removed from `tiles_used` / hold-outs (2025 `3_36` unchanged).
 
 ## Setups
 
@@ -25,6 +27,20 @@ Regenerate alternate YAMLs + GeoJSONs (does **not** overwrite `baseline.yaml`):
 ```bat
 python BoulderCalculator\scripts\generate_coastal_splits.py --segmentation-dir segmentation --output-dir BoulderCalculator\experiments\geo_splits --also-baseline-geojson
 ```
+
+## Shared aug pool (one folder, not five)
+
+There is **one** offline-augmented dataset for all tiles:
+
+| Path | Role |
+|------|------|
+| `segmentation\coco_geo_all` | All tiles as train (`all_tiles.yaml`) |
+| `segmentation\coco_geo_all_rgb_dsm` | Same, 4-band images |
+| `segmentation\coco_geo_all_rgb_dsm_aug` | Offline 8× + jitter on that pool |
+| `segmentation\coco_geo_<setup>_from_pool` | Thin per-setup COCO: JSONs + **symlinks** into the shared aug images |
+
+Each training run only materializes which pool tiles belong to train/valid/test
+for that geographic setup (`materialize_geo_split_coco.py`).
 
 ## Windows machine setup
 
@@ -48,14 +64,11 @@ python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 24
 python BoulderCalculator\scripts\build_rgb_dsm_tiles.py --year 25
 ```
 
-Or let the weekend / smoke runner fill gaps: it calls
-`build_rgb_dsm_tiles.py --from-coco` for any tiles a setup still needs (requires
-`2024\` / `2025\` DSM GeoTIFFs). Optional full rebuild: `--build-rgb-dsm-tiles`
-/ `--force-tiles`.
+Or let the smoke / weekend runner fill gaps via `--from-coco` (requires DSM
+GeoTIFFs). Optional full rebuild: `--build-rgb-dsm-tiles` / `--force-tiles`.
 
-These dirs are **shared** across setups (`segmentation\tiling_rgb_dsm_24` /
-`tiling_rgb_dsm_25`). Per-setup COCO dirs are separate and large once all
-splits are 8× augmented — keep them on the USB / short drive.
+Rebuild the shared COCO+aug pool after changing annotations or small-boulder
+policy: `--force-pool`.
 
 ## Smoke all setups (do this before leaving for the weekend)
 
@@ -71,15 +84,18 @@ Or:
 python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode smoke --device cuda --num-workers 2
 ```
 
-Optional: `--setups baseline,sporadic_aligned` · `--skip-train` (dataset only) ·
-`--build-rgb-dsm-tiles` · `--device cpu` (slow).
+Optional flags:
 
-Smoke recipe per setup:
+- `--setups baseline,sporadic_aligned`
+- `--skip-train` (pool + materialize only)
+- `--drop-below-min-area` — omit boulders below `--min-area-m2` instead of `iscrowd=1`
+- `--force-pool` — rebuild shared aug pool
+- `--build-rgb-dsm-tiles` · `--device cpu`
 
-1. `gpkg_to_coco.py --split-config …yaml`
-2. `build_coco_rgb_dsm.py` → `segmentation\coco_geo_<id>_rgb_dsm`
-3. `augment_coco_dataset.py --splits train,valid,test --jitter 0.15`
-4. `train_boulder_local.py --four-band --no-rich-aug --max-iter 3 --image-size 800 …`
+Smoke flow:
+
+1. Build shared pool once (`all_tiles.yaml` → RGB+DSM → offline aug)
+2. For each setup: `materialize_geo_split_coco.py` → short `--four-band --no-rich-aug` train
 
 Stops on the first failing setup so you can fix before the long loop.
 
@@ -90,7 +106,8 @@ BoulderCalculator\experiments\geo_splits\run_geo_weekend.bat
 ```
 
 That script: ensures RGB+DSM tiles → smoke all setups → trains each setup at
-`--max-iter 5000 --batch-size 2 --checkpoint-period 2000 --eval-period 500`.
+`--max-iter 5000 --batch-size 2 --checkpoint-period 2000 --eval-period 500`
+(reuses the shared aug pool).
 
 Outputs under `segmentation\training_run_geo_<id>\`:
 
@@ -107,12 +124,18 @@ Manual single setup:
 python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode weekend --device cuda --setups baseline
 ```
 
+Drop small boulders entirely (rebuilds pool when combined with `--force-pool`):
+
+```bat
+python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode smoke --device cuda --drop-below-min-area --force-pool
+```
+
 ## Disk note
 
-Augmenting **train + valid + test** at 8× on 4-band GeoTIFFs for five setups is
-heavy. Prefer a second drive / USB for `segmentation\coco_geo_*` and
-`training_run_geo_*`. Delete smoke output dirs
-(`training_run_geo_*_smoke`) after a successful smoke if space is tight.
+Only **one** 8× 4-band aug of all tiles is stored (`coco_geo_all_rgb_dsm_aug`).
+Per-setup dirs are mostly symlinks + JSON. Prefer a second drive / USB for the
+pool and `training_run_geo_*`. Delete `training_run_geo_*_smoke` after a
+successful smoke if space is tight.
 
 ## Matching / inference
 

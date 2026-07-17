@@ -6,7 +6,6 @@ description: >
 leakage_check: geographic
 valid:
   24:
-    - "3_36"
     - "7_38"
     - "7_39"
     - "8_37"
