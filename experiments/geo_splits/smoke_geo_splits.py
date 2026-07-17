@@ -247,6 +247,7 @@ def pipeline_one(
     device: str,
     num_workers: int,
     skip_train: bool,
+    no_eval: bool,
 ) -> None:
     split_yaml = GEO_SPLITS_DIR / f"{setup}.yaml"
     if not split_yaml.is_file():
@@ -280,33 +281,33 @@ def pipeline_one(
         print(f"[skip] train for {setup}")
         return
 
-    run(
-        [
-            py,
-            str(SCRIPTS / "train_boulder_local.py"),
-            "--dataset-dir",
-            str(coco_setup),
-            "--output-dir",
-            str(out_dir),
-            "--four-band",
-            "--no-rich-aug",
-            "--max-iter",
-            str(max_iter),
-            "--batch-size",
-            str(batch_size),
-            "--image-size",
-            str(image_size),
-            "--checkpoint-period",
-            str(checkpoint_period),
-            "--eval-period",
-            str(eval_period),
-            "--num-workers",
-            str(num_workers),
-            "--device",
-            device,
-        ],
-        label=f"{setup}: train max_iter={max_iter}",
-    )
+    train_cmd = [
+        py,
+        str(SCRIPTS / "train_boulder_local.py"),
+        "--dataset-dir",
+        str(coco_setup),
+        "--output-dir",
+        str(out_dir),
+        "--four-band",
+        "--no-rich-aug",
+        "--max-iter",
+        str(max_iter),
+        "--batch-size",
+        str(batch_size),
+        "--image-size",
+        str(image_size),
+        "--checkpoint-period",
+        str(checkpoint_period),
+        "--eval-period",
+        str(eval_period),
+        "--num-workers",
+        str(num_workers),
+        "--device",
+        device,
+    ]
+    if no_eval:
+        train_cmd.append("--no-eval")
+    run(train_cmd, label=f"{setup}: train max_iter={max_iter}")
 
 
 def main() -> None:
@@ -325,6 +326,29 @@ def main() -> None:
     )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Override IMS_PER_BATCH (weekend default 2; smoke default 1). Use 1 if VRAM is tight.",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Override square resize (weekend default 2000; smoke default 800).",
+    )
+    parser.add_argument(
+        "--max-iter",
+        type=int,
+        default=None,
+        help="Override max iterations (weekend default 5000; smoke default 3).",
+    )
+    parser.add_argument(
+        "--no-eval",
+        action="store_true",
+        help="Skip periodic + final COCO eval (saves VRAM; no AP curves).",
+    )
     parser.add_argument("--min-area-m2", type=float, default=1.0)
     parser.add_argument(
         "--drop-below-min-area",
@@ -377,6 +401,17 @@ def main() -> None:
     else:
         max_iter, batch_size, image_size = 5000, 2, 2000
         checkpoint_period, eval_period = 2000, 500
+    if args.max_iter is not None:
+        max_iter = args.max_iter
+    if args.batch_size is not None:
+        batch_size = args.batch_size
+    if args.image_size is not None:
+        image_size = args.image_size
+
+    print(
+        f"Train knobs: max_iter={max_iter} batch_size={batch_size} "
+        f"image_size={image_size} no_eval={args.no_eval}"
+    )
 
     # Changing small-boulder policy requires a fresh pool (annotations differ).
     force_pool = args.force_pool or args.drop_below_min_area
@@ -407,6 +442,7 @@ def main() -> None:
                 device=args.device,
                 num_workers=args.num_workers,
                 skip_train=args.skip_train,
+                no_eval=args.no_eval,
             )
         except SystemExit as exc:
             print(exc, flush=True)
