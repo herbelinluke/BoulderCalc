@@ -43,6 +43,7 @@ back here for the workflow:
 - **Linux / portable (USB):** [`setup/README_PORTABLE.md`](setup/README_PORTABLE.md)
 - **Windows (normal/admin):** [`setup/README_WINDOWS.md`](setup/README_WINDOWS.md)
 - **Windows (guest / no admin / long‑path issues):** [`setup/README_WINDOWS_GUEST.md`](setup/README_WINDOWS_GUEST.md)
+- **Geo-split weekend experiment (RGB+DSM, five region setups):** [`experiments/geo_splits/README.md`](experiments/geo_splits/README.md)
 
 All three install the same stack: a Python 3.10/3.11 environment,
 `setup/requirements-training.txt`, GPU PyTorch, and Detectron2 (wheel on Linux,
@@ -112,7 +113,9 @@ penalized around them. Use `--no-boulder-only` for a trainable two‑class datas
 
 Useful flags: `--gpkg a.gpkg:24,b.gpkg:25` (override annotations),
 `--roi path` (re‑enable ROI clipping; off by default), `--tiles-used path`,
-`--years 24` or `--years 25` (single year). Full list: `--help`.
+`--years 24` or `--years 25` (single year),
+`--split-config path.yaml` (alternate geographic hold-outs; see
+[`experiments/geo_splits/`](experiments/geo_splits/)). Full list: `--help`.
 
 Sanity‑check the polygons before training:
 
@@ -123,9 +126,10 @@ python BoulderCalculator/scripts/visualize_coco_annotations.py --dataset-dir seg
 ## 6. Step 2 — Offline augmentation
 
 Multiplies the **train** split with exact geometric variants (polygons
-transformed to match); valid/test are copied unchanged. The default variant set
-is the full dihedral group (8×), e.g. ~111 → ~888 train images. Scale
-`--max-iter` up accordingly.
+transformed to match); valid/test are copied unchanged by default. The default
+variant set is the full dihedral group (8×), e.g. ~111 → ~888 train images.
+Scale `--max-iter` up accordingly. Pass `--splits train,valid,test` to
+offline-augment every split (geo-split weekend experiment).
 
 ```bash
 python BoulderCalculator/scripts/augment_coco_dataset.py --input-dir segmentation/coco_dataset_both --output-dir segmentation/coco_dataset_both_aug --jitter 0.15
@@ -187,6 +191,8 @@ All of these are flags on `train_boulder_local.py`:
 | `--image-size` | `2000` | Square train/test resize (lower for smoke tests) |
 | `--no-eval` | off | Skip periodic + final COCO eval (saves VRAM/time) |
 | `--no-rich-aug` | off | Disable the coastal aug stack (rotation/flips/scale/photometric); use resize‑only |
+| `--checkpoint-period` | 2000 if `max-iter>=1000`, else short-run formula | Write `model_XXXX.pth` every N iters |
+| `--eval-period` | 500 if `max-iter>=1000`, else short-run formula | Validation COCO eval every N iters (AP in `metrics.json`) |
 
 Notes:
 - `--resume` and `--weights` are different: resume continues a run from its
@@ -298,11 +304,13 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 `--segmentation-dir`, `--years` (24,25), `--gpkg`, `--roi` (off),
 `--tiles-used`, `--output-dir`, `--min-area-m2` (0.0),
 `--boulder-only`/`--no-boulder-only` (on), `--layer`, `--class-field` (Class),
-`--train-tiles`/`--valid-tiles`/`--test-tiles`.
+`--train-tiles`/`--valid-tiles`/`--test-tiles`,
+`--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline).
 
-**`scripts/augment_coco_dataset.py`** — offline train‑split aug.
+**`scripts/augment_coco_dataset.py`** — offline split aug.
 `--input-dir`*, `--output-dir`*, `--variants` (full dihedral 8×), `--jitter`
-(0.0), `--seed` (42).
+(0.0), `--seed` (42), `--splits` (default `train`; use `train,valid,test` to
+expand every split).
 
 **`scripts/build_rgb_dsm_tiles.py`** — warp DSM onto ortho tiles.
 `--year`* (24|25), `--dsm` (year default), `--ortho-dir` (segmentation/tiling),

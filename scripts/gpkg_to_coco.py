@@ -306,28 +306,75 @@ def tiles_for_year(year: int, tiles_by_year: dict[int, list[str]] | None = None)
     return [canonical_key(k) for k in source[year]]
 
 
+def _year_tile_map(raw: dict | None) -> dict[int, list[str]]:
+    """Normalize split-config year maps ({24: [...]} or {"24": [...]})."""
+    out: dict[int, list[str]] = {}
+    for year, keys in (raw or {}).items():
+        out[int(year)] = [canonical_key(k) for k in (keys or [])]
+    return out
+
+
+def load_split_config(path: Path) -> dict:
+    """Load a geographic split YAML/JSON (see experiments/geo_splits/)."""
+    text = path.read_text()
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise SystemExit(
+                f"Reading {path} needs PyYAML (pip install pyyaml), "
+                "or use a .json split config."
+            ) from exc
+        data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError(f"Split config must be a mapping: {path}")
+    data = dict(data)
+    data["valid"] = _year_tile_map(data.get("valid"))
+    data["test"] = _year_tile_map(data.get("test"))
+    data["excluded"] = _year_tile_map(data.get("excluded"))
+    check = str(data.get("leakage_check", "geographic")).strip().lower()
+    if check not in ("geographic", "location_consistency"):
+        raise ValueError(
+            f"leakage_check must be 'geographic' or 'location_consistency', got {check!r}"
+        )
+    data["leakage_check"] = check
+    data.setdefault("id", path.stem)
+    return data
+
+
 def expand_year_keys(
     years: list[int],
     tiles_by_year: dict[int, list[str]] | None = None,
+    split_config: dict | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Return (train, valid, test) year-prefixed keys for the given years.
 
     Hold-outs are geographic blocks shared across years (no footprint overlap
-    between train/valid/test). EXCLUDED_* tiles are omitted from every split.
+    between train/valid/test when using the default / buffered configs).
+    EXCLUDED_* tiles (or config ``excluded``) are omitted from every split.
     """
+    if split_config is None:
+        valid_by = {24: list(VALID_24), 25: list(VALID_25)}
+        test_by = {24: list(TEST_24), 25: list(TEST_25)}
+        excl_by = {24: list(EXCLUDED_24), 25: list(EXCLUDED_25)}
+    else:
+        valid_by = {24: [], 25: [], **split_config.get("valid", {})}
+        test_by = {24: [], 25: [], **split_config.get("test", {})}
+        excl_by = {24: [], 25: [], **split_config.get("excluded", {})}
+
     train, valid, test = [], [], []
     for year in years:
         tiles = tiles_for_year(year, tiles_by_year)
-        valid_set = {canonical_key(k) for k in (VALID_24 if year == 24 else VALID_25)}
-        test_set = {canonical_key(k) for k in (TEST_24 if year == 24 else TEST_25)}
-        excluded_set = {
-            canonical_key(k) for k in (EXCLUDED_24 if year == 24 else EXCLUDED_25)
-        }
+        valid_set = {canonical_key(k) for k in valid_by.get(year, [])}
+        test_set = {canonical_key(k) for k in test_by.get(year, [])}
+        excluded_set = {canonical_key(k) for k in excl_by.get(year, [])}
         missing_holdouts = sorted((valid_set | test_set) - set(tiles))
         if missing_holdouts:
             raise ValueError(
                 f"Hold-out tiles not in year {year} tile list: {missing_holdouts}. "
-                "Update VALID_*/TEST_* or tiles_used.txt."
+                "Update the split config or tiles_used.txt."
             )
         overlap_holdouts = sorted(valid_set & test_set)
         if overlap_holdouts:
@@ -394,6 +441,67 @@ def assert_no_geographic_leakage(
     check("train", train, "valid", valid)
     check("train", train, "test", test)
     check("valid", valid, "test", test)
+
+
+def assert_location_consistency(
+    tile_dir: Path,
+    train: list[str],
+    valid: list[str],
+    test: list[str],
+) -> None:
+    """Raise if greedily paired cross-year partners land in different splits.
+
+    Uses the same 1:1 opposite-year matching as generate_coastal_splits
+    (largest-overlap first). Same-year neighbors may differ across splits.
+    """
+    import rasterio
+
+    split_of = {yk: "train" for yk in train}
+    split_of.update({yk: "valid" for yk in valid})
+    split_of.update({yk: "test" for yk in test})
+    all_keys = list(split_of)
+
+    def bounds(yk: str) -> tuple[float, float, float, float]:
+        with rasterio.open(resolve_tile_path(tile_dir, yk)) as ds:
+            b = ds.bounds
+            return (b.left, b.bottom, b.right, b.top)
+
+    def overlap_area(
+        a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+    ) -> float:
+        ix0 = max(a[0], b[0])
+        iy0 = max(a[1], b[1])
+        ix1 = min(a[2], b[2])
+        iy1 = min(a[3], b[3])
+        return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+    cache = {yk: bounds(yk) for yk in all_keys}
+    keys_24 = [k for k in all_keys if k.startswith("24_")]
+    keys_25 = [k for k in all_keys if k.startswith("25_")]
+    pairs: list[tuple[float, str, str]] = []
+    for a in keys_24:
+        for b in keys_25:
+            area = overlap_area(cache[a], cache[b])
+            if area >= 1.0:
+                pairs.append((area, a, b))
+    pairs.sort(key=lambda t: t[0], reverse=True)
+
+    used: set[str] = set()
+    bad = []
+    for _area, a, b in pairs:
+        if a in used or b in used:
+            continue
+        used.add(a)
+        used.add(b)
+        if split_of[a] != split_of[b]:
+            bad.append((a, b, split_of[a], split_of[b]))
+    if bad:
+        sample = ", ".join(f"{a}/{b} ({sa}≠{sb})" for a, b, sa, sb in bad[:8])
+        more = f" (+{len(bad) - 8} more)" if len(bad) > 8 else ""
+        raise ValueError(
+            f"Location consistency failed: {len(bad)} cross-year pair(s) "
+            f"split apart. e.g. {sample}{more}"
+        )
 
 
 def resolve_tile_path(tile_dir: Path, key: str, year: int | None = None) -> Path:
@@ -1050,6 +1158,15 @@ def main() -> None:
     parser.add_argument("--valid-tiles", type=str, default=None)
     parser.add_argument("--test-tiles", type=str, default=None)
     parser.add_argument(
+        "--split-config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML/JSON geographic split (valid/test/excluded per year). "
+            "Default: baked-in baseline hold-outs. See experiments/geo_splits/."
+        ),
+    )
+    parser.add_argument(
         "--write-extents",
         action="store_true",
         help="Write tile footprints GeoJSON into segmentation-dir/tile_extents/",
@@ -1068,11 +1185,21 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(f"Annotation GPKG not found: {path}")
 
+    split_config = load_split_config(args.split_config) if args.split_config else None
     tiles_by_year = resolve_tiles_by_year(seg_dir, args.tiles_used)
-    train_default, valid_default, test_default = expand_year_keys(years, tiles_by_year)
-    n_excluded = sum(
-        len(EXCLUDED_24 if y == 24 else EXCLUDED_25)
-        for y in years
+    train_default, valid_default, test_default = expand_year_keys(
+        years, tiles_by_year, split_config=split_config
+    )
+    if split_config is None:
+        n_excluded = sum(len(EXCLUDED_24 if y == 24 else EXCLUDED_25) for y in years)
+        split_id = "baseline"
+        leakage_check = "geographic"
+    else:
+        n_excluded = sum(len(split_config["excluded"].get(y, [])) for y in years)
+        split_id = split_config.get("id", args.split_config.stem)
+        leakage_check = split_config["leakage_check"]
+    print(
+        f"Split config: {split_id} (leakage_check={leakage_check})"
     )
     print(
         f"Splits: train={len(train_default)} valid={len(valid_default)} "
@@ -1084,14 +1211,26 @@ def main() -> None:
         + " test="
         + ",".join(test_default)
     )
-    # Verify no cross-year (or within-year) footprint overlap between splits.
+    # Verify leakage policy for this split config.
     try:
-        assert_no_geographic_leakage(
-            tile_dir, train_default, valid_default, test_default
-        )
-        print("Geographic leakage check: OK (no overlapping footprints across splits)")
+        if leakage_check == "location_consistency":
+            assert_location_consistency(
+                tile_dir, train_default, valid_default, test_default
+            )
+            print(
+                "Location consistency check: OK "
+                "(overlapping footprints stay in one split)"
+            )
+        else:
+            assert_no_geographic_leakage(
+                tile_dir, train_default, valid_default, test_default
+            )
+            print(
+                "Geographic leakage check: OK "
+                "(no overlapping footprints across splits)"
+            )
     except FileNotFoundError as exc:
-        print(f"Geographic leakage check skipped (missing tile): {exc}")
+        print(f"Leakage check skipped (missing tile): {exc}")
 
     if (
         args.no_roi

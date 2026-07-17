@@ -155,6 +155,8 @@ def build_cfg(
     four_band: bool = False,
     image_size: int = 2000,
     eval_during_train: bool = True,
+    checkpoint_period: int | None = None,
+    eval_period: int | None = None,
 ) -> detectron2.config.CfgNode:
     cfg = get_cfg()
     cfg.merge_from_file(
@@ -165,7 +167,12 @@ def build_cfg(
     # makes EvalHook look for datasets/coco/annotations/instances_val2017.json.
     if eval_during_train:
         cfg.DATASETS.TEST = ("boulder_valid",)
-        cfg.TEST.EVAL_PERIOD = max(1, min(50, max(1, max_iter // 2)))
+        if eval_period is not None:
+            cfg.TEST.EVAL_PERIOD = max(1, eval_period)
+        elif max_iter >= 1000:
+            cfg.TEST.EVAL_PERIOD = 500
+        else:
+            cfg.TEST.EVAL_PERIOD = max(1, min(50, max(1, max_iter // 2)))
     else:
         cfg.DATASETS.TEST = ()
         cfg.TEST.EVAL_PERIOD = 0
@@ -213,7 +220,12 @@ def build_cfg(
     }
     cfg.SOLVER.STEPS = tuple(sorted(s for s in raw_steps if s < max_iter))
     cfg.SOLVER.GAMMA = 0.1
-    cfg.SOLVER.CHECKPOINT_PERIOD = max(1, min(50, max(1, max_iter // 2)))
+    if checkpoint_period is not None:
+        cfg.SOLVER.CHECKPOINT_PERIOD = max(1, checkpoint_period)
+    elif max_iter >= 1000:
+        cfg.SOLVER.CHECKPOINT_PERIOD = 2000
+    else:
+        cfg.SOLVER.CHECKPOINT_PERIOD = max(1, min(50, max(1, max_iter // 2)))
     cfg.TEST.DETECTIONS_PER_IMAGE = 300
 
     cfg.OUTPUT_DIR = str(output_dir)
@@ -295,6 +307,25 @@ def main() -> None:
             "jitter, photometric). Falls back to Detectron2 resize-only train augs."
         ),
     )
+    parser.add_argument(
+        "--checkpoint-period",
+        type=int,
+        default=None,
+        help=(
+            "Write model_XXXX.pth every N iterations. Default: 2000 when "
+            "max-iter>=1000, else min(50, max_iter//2)."
+        ),
+    )
+    parser.add_argument(
+        "--eval-period",
+        type=int,
+        default=None,
+        help=(
+            "Run validation COCO eval every N iterations (AP curves in "
+            "metrics.json). Default: 500 when max-iter>=1000, else "
+            "min(50, max_iter//2). Ignored with --no-eval."
+        ),
+    )
     args = parser.parse_args()
 
     BoulderTrainer.four_band = args.four_band
@@ -310,6 +341,8 @@ def main() -> None:
         four_band=args.four_band,
         image_size=args.image_size,
         eval_during_train=not args.no_eval,
+        checkpoint_period=args.checkpoint_period,
+        eval_period=args.eval_period,
     )
     if args.no_rich_aug:
         cfg.INPUT.BOULDER_RICH_AUG = False
@@ -323,6 +356,8 @@ def main() -> None:
     print("Train images registered:", len(DatasetCatalog.get("boulder_train")))
     print("Output dir:", cfg.OUTPUT_DIR)
     print("MAX_ITER:", cfg.SOLVER.MAX_ITER)
+    print("CHECKPOINT_PERIOD:", cfg.SOLVER.CHECKPOINT_PERIOD)
+    print("EVAL_PERIOD:", cfg.TEST.EVAL_PERIOD)
     print("PIXEL_MEAN:", list(cfg.MODEL.PIXEL_MEAN))
 
     # Cache zoo weights path before resume_or_load (needed to patch 4-channel stem).
