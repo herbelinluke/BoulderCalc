@@ -37,7 +37,7 @@ There is **one** offline-augmented dataset for all tiles:
 | `segmentation\coco_geo_all` | All tiles as train (`all_tiles.yaml`) |
 | `segmentation\coco_geo_all_rgb_dsm` | Same, 4-band images |
 | `segmentation\coco_geo_all_rgb_dsm_aug` | Offline 8× + jitter on that pool |
-| `segmentation\coco_geo_<setup>_from_pool` | Thin per-setup COCO: JSONs + **symlinks** into the shared aug images |
+| `segmentation\coco_geo_<setup>_from_pool` | Thin per-setup COCO: JSONs + **hard links** into the shared aug images (no extra GB) |
 
 Each training run only materializes which pool tiles belong to train/valid/test
 for that geographic setup (`materialize_geo_split_coco.py`).
@@ -132,10 +132,14 @@ python BoulderCalculator\experiments\geo_splits\smoke_geo_splits.py --mode smoke
 
 ## Disk note
 
-Only **one** 8× 4-band aug of all tiles is stored (`coco_geo_all_rgb_dsm_aug`).
-Per-setup dirs are mostly symlinks + JSON. Prefer a second drive / USB for the
-pool and `training_run_geo_*`. Delete `training_run_geo_*_smoke` after a
-successful smoke if space is tight.
+Only **one** 8× 4-band aug of all tiles is stored (`coco_geo_all_rgb_dsm_aug`,
+~20GB). Per-setup dirs use **NTFS hard links** into that pool (no second copy).
+Symlinks need admin / Developer Mode on Windows guest — the runners pass
+`--link-mode hard` instead. Avoid `--link-mode copy` (would multiply the 20GB).
+
+Leave headroom for five `training_run_geo_*` dirs (checkpoints are sparse:
+every 2000 iters + final). Prefer a second drive / USB. Delete
+`training_run_geo_*_smoke` after a successful smoke if space is tight.
 
 ## Matching / inference
 

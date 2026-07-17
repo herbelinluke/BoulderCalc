@@ -2,7 +2,8 @@
 """Smoke-test every geo-split setup (RGB+DSM, offline+jitter, no online augs).
 
 Builds a **shared** all-tiles RGB+DSM offline-aug pool once, then materializes
-each setup's train/valid/test (symlinks into the pool) and runs a short train.
+each setup's train/valid/test (hard-links into the pool by default; works on
+Windows guest without admin) and runs a short train.
 Fails fast with the setup id on error.
 
 Run from the project root (parent of BoulderCalculator/ and segmentation/):
@@ -251,7 +252,7 @@ def pipeline_one(
     if not split_yaml.is_file():
         raise SystemExit(f"Missing split config: {split_yaml}")
 
-    # Thin per-setup dir: JSONs + symlinks into the shared pool images.
+    # Thin per-setup dir: JSONs + hard-links into the shared pool images.
     coco_setup = root / "segmentation" / f"coco_geo_{setup}_from_pool"
     out_dir = root / "segmentation" / f"training_run_geo_{setup}"
     if max_iter <= 20:
@@ -269,6 +270,8 @@ def pipeline_one(
             str(root / "segmentation"),
             "--output-dir",
             str(coco_setup),
+            "--link-mode",
+            "hard",
         ],
         label=f"{setup}: materialize from shared pool",
     )
