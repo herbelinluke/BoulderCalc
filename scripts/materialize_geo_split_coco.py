@@ -3,14 +3,18 @@
 
 The geo-split weekend experiment builds and augments **all** tiles once
 (``all_tiles.yaml`` → ``coco_geo_all_rgb_dsm_aug``). Each setup then filters
-that pool into train/valid/test by geographic split config, using symlinks to
-the shared images (no second 8× copy).
+that pool into train/valid/test by geographic split config.
+
+By default images are **hard-linked** into the output (same disk blocks, no
+extra space; works on Windows guest / non-admin). Symlinks need admin or
+Developer Mode on Windows. ``--link-mode copy`` duplicates files (avoid —
+the pool is already ~20GB).
 
 Example:
   python BoulderCalculator/scripts/materialize_geo_split_coco.py \\
     --pool-dir segmentation/coco_geo_all_rgb_dsm_aug \\
     --split-config BoulderCalculator/experiments/geo_splits/baseline.yaml \\
-    --output-dir segmentation/coco_geo_baseline_rgb_dsm_aug
+    --output-dir segmentation/coco_geo_baseline_from_pool
 """
 
 from __future__ import annotations
@@ -83,7 +87,6 @@ def load_pool_images(pool_dir: Path) -> tuple[dict, list[dict], dict[int, list[d
             categories = data.get("categories", [])
             licenses = data.get("licenses", [])
             info = data.get("info", {})
-        # Images may live under train/ even when listed only in train JSON.
         for image in data["images"]:
             images_by_id[image["id"]] = {**image, "_pool_split": split}
         for ann in data["annotations"]:
@@ -115,16 +118,62 @@ def resolve_pool_image(pool_dir: Path, pool_split: str, file_name: str) -> Path:
     raise FileNotFoundError(f"Pool image not found for {file_name!r} under {pool_dir}")
 
 
-def link_or_copy(src: Path, dst: Path, copy: bool) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+def _unlink_dst(dst: Path) -> None:
     if dst.exists() or dst.is_symlink():
         dst.unlink()
-    if copy:
+
+
+def link_or_copy(src: Path, dst: Path, mode: str) -> str:
+    """Create dst referring to src. Returns the mode actually used.
+
+    Modes:
+      hard    — os.link (same NTFS volume; no admin; no extra bytes)
+      symlink — os.symlink (needs admin or Developer Mode on Windows)
+      copy    — shutil.copy2 (full duplicate; avoid for large pools)
+      auto    — hard → symlink → copy
+    """
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    _unlink_dst(dst)
+    src = src.resolve()
+
+    def try_hard() -> bool:
+        try:
+            os.link(src, dst)
+            return True
+        except OSError:
+            return False
+
+    def try_symlink() -> bool:
+        try:
+            os.symlink(src, dst)
+            return True
+        except OSError:
+            return False
+
+    if mode == "copy":
         shutil.copy2(src, dst)
-        return
-    # Relative symlink so the dataset dir is portable within the same drive.
-    rel = os.path.relpath(src, start=dst.parent)
-    os.symlink(rel, dst)
+        return "copy"
+    if mode == "hard":
+        if not try_hard():
+            raise OSError(
+                f"Hard link failed for {dst.name}. Pool and output must be on "
+                "the same NTFS volume. Use --link-mode copy only as a last resort."
+            )
+        return "hard"
+    if mode == "symlink":
+        if not try_symlink():
+            raise OSError(
+                f"Symlink failed for {dst.name}. On Windows guest accounts enable "
+                "Developer Mode or run elevated, or use --link-mode hard (default)."
+            )
+        return "symlink"
+    # auto
+    if try_hard():
+        return "hard"
+    if try_symlink():
+        return "symlink"
+    shutil.copy2(src, dst)
+    return "copy"
 
 
 def materialize_split(
@@ -136,7 +185,7 @@ def materialize_split(
     pool_images: list[dict],
     anns_by_image: dict[int, list[dict]],
     meta: dict,
-    copy: bool,
+    link_mode: str,
 ) -> dict:
     selected = []
     for image in pool_images:
@@ -151,13 +200,21 @@ def materialize_split(
     new_annotations: list[dict] = []
     image_id = 1
     ann_id = 1
+    modes_used: dict[str, int] = {}
 
     for image in selected:
-        src = resolve_pool_image(pool_dir, image.get("_pool_split", "train"), image["file_name"])
-        link_or_copy(src, out_img_dir / image["file_name"], copy=copy)
+        src = resolve_pool_image(
+            pool_dir, image.get("_pool_split", "train"), image["file_name"]
+        )
+        used = link_or_copy(src, out_img_dir / image["file_name"], link_mode)
+        modes_used[used] = modes_used.get(used, 0) + 1
         new_images.append(
             {
-                **{k: v for k, v in image.items() if not k.startswith("_") and k != "id"},
+                **{
+                    k: v
+                    for k, v in image.items()
+                    if not k.startswith("_") and k != "id"
+                },
                 "id": image_id,
             }
         )
@@ -188,6 +245,7 @@ def materialize_split(
         "tile_keys": len(year_keys),
         "images": len(new_images),
         "annotations": len(new_annotations),
+        "link_modes": modes_used,
         "json": str(ann_path),
     }
 
@@ -204,17 +262,31 @@ def main() -> None:
         help="For tiles_used resolution when expanding the split config.",
     )
     parser.add_argument(
+        "--link-mode",
+        choices=("auto", "hard", "symlink", "copy"),
+        default="auto",
+        help=(
+            "How to place pool images into the setup dir. "
+            "auto (default): hard link → symlink → copy. "
+            "Prefer hard on Windows guest (no admin, no extra disk). "
+            "copy duplicates ~20GB×setups — avoid if possible."
+        ),
+    )
+    parser.add_argument(
         "--copy",
         action="store_true",
-        help="Copy images instead of symlinking (default: symlink into output).",
+        help="Deprecated alias for --link-mode copy.",
     )
     parser.add_argument("--years", type=str, default="24,25")
     args = parser.parse_args()
 
+    link_mode = "copy" if args.copy else args.link_mode
     years = sorted({int(p.strip()) for p in args.years.split(",") if p.strip()})
     split_config = load_split_config(args.split_config)
     tiles_by_year = resolve_tiles_by_year(args.segmentation_dir, None)
-    train, valid, test = expand_year_keys(years, tiles_by_year, split_config=split_config)
+    train, valid, test = expand_year_keys(
+        years, tiles_by_year, split_config=split_config
+    )
 
     meta, pool_images, anns_by_image = load_pool_images(args.pool_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -230,10 +302,20 @@ def main() -> None:
                 pool_images=pool_images,
                 anns_by_image=anns_by_image,
                 meta=meta,
-                copy=args.copy,
+                link_mode=link_mode,
             )
         )
-    print(json.dumps({"pool": str(args.pool_dir), "setup": split_config.get("id"), "splits": summary}, indent=2))
+    print(
+        json.dumps(
+            {
+                "pool": str(args.pool_dir),
+                "setup": split_config.get("id"),
+                "link_mode_requested": link_mode,
+                "splits": summary,
+            },
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

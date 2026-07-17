@@ -104,20 +104,30 @@ geographic blocks (~111 train / 27 valid / 42 test, plus a buffer).
 python BoulderCalculator/scripts/gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation/coco_dataset_both --min-area-m2 1.0
 ```
 
-**Crowd‑ignore behavior (default `--boulder-only`).** The dataset is single
-class (`Boulder`). BoulderDeposit polygons and boulders smaller than
-`--min-area-m2` are **kept as COCO `iscrowd=1` ignore regions**, not dropped:
-they are neither positives nor background negatives, so the model is not
-penalized around them. Use `--no-boulder-only` for a trainable two‑class dataset
-(deposits become category 2; sub‑`--min-area-m2` boulders still become crowds).
+**Deposit / small‑boulder policies** (orthogonal):
+
+| Deposits | Flag |
+|----------|------|
+| `iscrowd=1` ignore | `--boulder-only` (default) |
+| trainable class 2 | `--no-boulder-only` |
+| omitted entirely | `--drop-deposits` |
+
+| Small boulders (`--min-area-m2` > 0) | Flag |
+|--------------------------------------|------|
+| `iscrowd=1` ignore | default |
+| omitted entirely | `--drop-below-min-area` |
+| all trainable | `--min-area-m2 0` |
+
+Examples: no iscrowd → `--drop-deposits --drop-below-min-area --min-area-m2 1.0`;
+iscrowd small only → `--drop-deposits --min-area-m2 1.0`; iscrowd deposits only →
+`--boulder-only --drop-below-min-area --min-area-m2 1.0`; iscrowd both →
+`--boulder-only --min-area-m2 1.0` (default deposit handling).
 
 Useful flags: `--gpkg a.gpkg:24,b.gpkg:25` (override annotations),
 `--roi path` (re‑enable ROI clipping; off by default), `--tiles-used path`,
 `--years 24` or `--years 25` (single year),
 `--split-config path.yaml` (alternate geographic hold-outs; see
-[`experiments/geo_splits/`](experiments/geo_splits/)),
-`--drop-below-min-area` (with `--min-area-m2`: omit small boulders instead of
-`iscrowd=1`). Full list: `--help`.
+[`experiments/geo_splits/`](experiments/geo_splits/)). Full list: `--help`.
 
 Sanity‑check the polygons before training:
 
@@ -306,6 +316,7 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 `--segmentation-dir`, `--years` (24,25), `--gpkg`, `--roi` (off),
 `--tiles-used`, `--output-dir`, `--min-area-m2` (0.0),
 `--drop-below-min-area` (omit small boulders instead of iscrowd),
+`--drop-deposits` (omit deposits instead of iscrowd/trainable),
 `--boulder-only`/`--no-boulder-only` (on), `--layer`, `--class-field` (Class),
 `--train-tiles`/`--valid-tiles`/`--test-tiles`,
 `--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline).
@@ -316,7 +327,9 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 expand every split).
 
 **`scripts/materialize_geo_split_coco.py`** — filter a shared offline-aug pool
-into train/valid/test for one `--split-config` (symlinks by default).
+into train/valid/test for one `--split-config`. Default `--link-mode auto`
+(hard link → symlink → copy). Smoke/weekend use `--link-mode hard` (Windows
+guest friendly, no extra disk).
 
 **`scripts/build_rgb_dsm_tiles.py`** — warp DSM onto ortho tiles.
 `--year`* (24|25), `--dsm` (year default), `--ortho-dir` (segmentation/tiling),
