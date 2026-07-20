@@ -146,3 +146,22 @@ every 2000 iters + final). Prefer a second drive / USB. Delete
 The Matching tools still default to the baked-in baseline `TEST_*` lists unless
 you point them at a setup’s test tiles. For this experiment, compare setups via
 each run’s `metrics_valid.json` / `metrics.json` AP curves first.
+
+## Evaluating results (compare runs + per-tile maps)
+
+See [`../eval/README.md`](../eval/README.md) and the notebook
+[`../eval/compare_training_runs.ipynb`](../eval/compare_training_runs.ipynb).
+
+```bash
+# Whole-split table + learning curves
+python BoulderCalculator/scripts/eval_compare_runs.py \
+  --segmentation-dir segmentation --geo-prefix training_run_geo_ \
+  --output-dir segmentation/eval_compare_geo
+
+# Per-tile AP/AR heatmaps (+ optional --merge-iou / --split-config difficulty)
+python BoulderCalculator/scripts/eval_per_tile.py \
+  --dataset-dir segmentation/coco_geo_baseline_rgb_dsm --split test \
+  --model segmentation/training_run_geo_baseline/model_final.pth \
+  --four-band --device cuda \
+  --output-dir segmentation/eval_per_tile_baseline_test
+```

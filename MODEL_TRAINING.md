@@ -258,6 +258,30 @@ python BoulderCalculator/scripts/visualize_detection_errors.py --gt-json segment
 Writes per‑tile TP/FP/FN images plus `error_analysis_summary.json` whose
 `totals` include aggregate `precision` and `recall`.
 
+**Compare multiple training runs** (tables + learning curves from
+`metrics_valid.json` / `metrics.json`):
+
+```bash
+python BoulderCalculator/scripts/eval_compare_runs.py --segmentation-dir segmentation --geo-prefix training_run_geo_ --output-dir segmentation/eval_compare_geo
+```
+
+**Per‑tile AP / AR heatmaps** (and optional overlap merge for sliding‑window
+detections). Interactive walkthrough:
+[`experiments/eval/compare_training_runs.ipynb`](experiments/eval/compare_training_runs.ipynb);
+CLI details: [`experiments/eval/README.md`](experiments/eval/README.md).
+
+```bash
+python BoulderCalculator/scripts/eval_per_tile.py --gt-json segmentation/coco_geo_baseline/testing_annotations.json --image-dir segmentation/tiling_rgb_dsm_24 --image-dir segmentation/tiling_rgb_dsm_25 --model segmentation/training_run_geo_baseline/model_final.pth --four-band --device cuda --output-dir segmentation/eval_per_tile_baseline_test
+```
+
+(If `coco_geo_*_rgb_dsm` is a full dataset on disk you can pass `--dataset-dir` instead.
+Missing tiles are skipped by default — this laptop often has only a subset of 4‑band tiles.)
+
+Add `--merge-iou 0.4` to NMS‑merge duplicates within each tile before scoring.
+Pass several `--split-config` YAMLs to average the same per‑tile scores over each
+geo‑setup’s test membership (check whether baseline hold‑outs are intrinsically
+easier).
+
 ## 12. Boulder matching
 
 The matcher (in `Matching/`) pairs boulder polygons between two surveys
@@ -361,6 +385,16 @@ guest friendly, no extra disk).
 
 **`scripts/coco_eval_with_recall.py`** — internal evaluator (no CLI); adds
 `AR1/AR10/AR100/ARs/ARm/ARl` to saved metrics.
+
+**`scripts/eval_compare_runs.py`** — compare many `metrics_valid.json` + plot
+eval curves from `metrics.json`. `--runs name=path` (repeatable), or
+`--segmentation-dir` + `--geo-prefix` (default `training_run_geo_`),
+`--output-dir`, `--metrics` (defaults include AP50/AR100).
+
+**`scripts/eval_per_tile.py`** — per‑tile COCO AP/AR + precision/recall heatmaps.
+`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split` + `--model`;
+`--merge-iou` (optional NMS), `--extents` (GeoJSON for QGIS), `--split-config`
+(repeatable; difficulty summary), `--four-band`, `--device`, `--output-dir`*.
 
 **Matching** — see [§12](#12-boulder-matching) and `Matching/README.md`.
 
