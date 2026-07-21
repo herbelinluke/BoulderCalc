@@ -166,7 +166,9 @@ python BoulderCalculator/scripts/train_boulder_local.py --dataset-dir segmentati
 - DSM band: `build_rgb_dsm_tiles.py` defaults to `2024/Sites1and2_2024_DSM_30mm.tif`
   / `2025/25IniSouthDSM.tif` (override with `--dsm`). Default `--dsm-mode
   elevation`; use `--dsm-mode local_relief` (with `--relief-radius-m`) for a
-  local‑relief band 4.
+  local‑relief band 4. Local-relief tiles default to
+  `segmentation/tiling_rgb_dsm_local_relief_{year}` (does not overwrite
+  elevation tiles). Full recipe: [`experiments/local_relief/README.md`](experiments/local_relief/README.md).
 - Smoke test: `--four-band --max-iter 3 --image-size 800 --device cpu`.
 
 ## 9. Training controls

@@ -245,7 +245,10 @@ def main() -> None:
 
     seg_root = args.ortho_dir.parent if args.ortho_dir.name == "tiling" else args.ortho_dir
     if args.output_dir is None:
-        args.output_dir = seg_root / f"tiling_rgb_dsm_{args.year}"
+        if args.dsm_mode == "local_relief":
+            args.output_dir = seg_root / f"tiling_rgb_dsm_local_relief_{args.year}"
+        else:
+            args.output_dir = seg_root / f"tiling_rgb_dsm_{args.year}"
 
     if args.from_coco is not None:
         keys = keys_from_coco(args.from_coco, args.year)
