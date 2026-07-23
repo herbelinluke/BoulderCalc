@@ -75,7 +75,6 @@ _TILES_USED_TEXT = """\
 13:5-13
 
 2024 tiles annotated:
-3:36
 4:44-46
 5:42-46
 6:40-45
