@@ -8,4 +8,5 @@ fiona>=1.9
 pandas>=2.0
 scipy>=1.11
 numpy>=1.26
+pyyaml>=6.0
 # Install torch + detectron2 separately (GPU-specific). See README_PORTABLE.md.

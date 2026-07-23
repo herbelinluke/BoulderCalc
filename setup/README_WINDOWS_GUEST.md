@@ -167,9 +167,22 @@ python BoulderCalculator\scripts\train_boulder_local.py --dataset-dir segmentati
 python BoulderCalculator\scripts\run_tile_inference.py --image segmentation\coco_dataset_rgb_dsm\test\24_Sites1and2_2024_Orthomosaic_14_15.tif --model segmentation\training_run_rgb_dsm\model_final.pth --gt-json segmentation\coco_dataset_rgb_dsm\testing_annotations.json --output-dir segmentation\visualizations\test_inference_rgb_dsm --score-thresh 0.4 --device cuda --four-band --class-names "Boulder"
 ```
 
+### Geo-split weekend experiment (RGB+DSM, five region setups)
+
+On branch `exp/geo-split-weekend`: offline+jitter on **all** splits, `--no-rich-aug`,
+sparse checkpoints. Full guide + smoke / weekend runners:
+
+[`../experiments/geo_splits/README.md`](../experiments/geo_splits/README.md)
+
+```bat
+BoulderCalculator\experiments\geo_splits\smoke_geo_splits.bat
+BoulderCalculator\experiments\geo_splits\run_geo_weekend.bat
+```
+
 Before logging out: copy `segmentation\training_run_both\` or
 `segmentation\training_run_rgb_dsm\` (at minimum `model_final.pth`,
-`metrics.json`, `metrics_valid.json`) somewhere permanent.
+`metrics.json`, `metrics_valid.json`) somewhere permanent. For geo-split runs,
+also copy `segmentation\training_run_geo_*\`.
 
 ## 6. Guest-account troubleshooting
 

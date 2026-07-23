@@ -1,0 +1,16 @@
+# All annotated tiles in the train split (no hold-outs). Used once to build the
+# shared RGB+DSM offline-aug pool; per-setup COCO dirs are materialized from it.
+id: all_tiles
+description: >
+  Every tiles_used tile goes to train. Empty valid/test/excluded. Build and
+  augment this once, then materialize_geo_split_coco.py per experiment setup.
+leakage_check: geographic
+valid:
+  24: []
+  25: []
+test:
+  24: []
+  25: []
+excluded:
+  24: []
+  25: []

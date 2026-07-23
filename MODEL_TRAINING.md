@@ -43,6 +43,7 @@ back here for the workflow:
 - **Linux / portable (USB):** [`setup/README_PORTABLE.md`](setup/README_PORTABLE.md)
 - **Windows (normal/admin):** [`setup/README_WINDOWS.md`](setup/README_WINDOWS.md)
 - **Windows (guest / no admin / long‑path issues):** [`setup/README_WINDOWS_GUEST.md`](setup/README_WINDOWS_GUEST.md)
+- **Geo-split weekend experiment (RGB+DSM, five region setups):** [`experiments/geo_splits/README.md`](experiments/geo_splits/README.md)
 
 All three install the same stack: a Python 3.10/3.11 environment,
 `setup/requirements-training.txt`, GPU PyTorch, and Detectron2 (wheel on Linux,
@@ -103,16 +104,30 @@ geographic blocks (~111 train / 27 valid / 42 test, plus a buffer).
 python BoulderCalculator/scripts/gpkg_to_coco.py --segmentation-dir segmentation --years 24,25 --output-dir segmentation/coco_dataset_both --min-area-m2 1.0
 ```
 
-**Crowd‑ignore behavior (default `--boulder-only`).** The dataset is single
-class (`Boulder`). BoulderDeposit polygons and boulders smaller than
-`--min-area-m2` are **kept as COCO `iscrowd=1` ignore regions**, not dropped:
-they are neither positives nor background negatives, so the model is not
-penalized around them. Use `--no-boulder-only` for a trainable two‑class dataset
-(deposits become category 2; sub‑`--min-area-m2` boulders still become crowds).
+**Deposit / small‑boulder policies** (orthogonal):
+
+| Deposits | Flag |
+|----------|------|
+| `iscrowd=1` ignore | `--boulder-only` (default) |
+| trainable class 2 | `--no-boulder-only` |
+| omitted entirely | `--drop-deposits` |
+
+| Small boulders (`--min-area-m2` > 0) | Flag |
+|--------------------------------------|------|
+| `iscrowd=1` ignore | default |
+| omitted entirely | `--drop-below-min-area` |
+| all trainable | `--min-area-m2 0` |
+
+Examples: no iscrowd → `--drop-deposits --drop-below-min-area --min-area-m2 1.0`;
+iscrowd small only → `--drop-deposits --min-area-m2 1.0`; iscrowd deposits only →
+`--boulder-only --drop-below-min-area --min-area-m2 1.0`; iscrowd both →
+`--boulder-only --min-area-m2 1.0` (default deposit handling).
 
 Useful flags: `--gpkg a.gpkg:24,b.gpkg:25` (override annotations),
 `--roi path` (re‑enable ROI clipping; off by default), `--tiles-used path`,
-`--years 24` or `--years 25` (single year). Full list: `--help`.
+`--years 24` or `--years 25` (single year),
+`--split-config path.yaml` (alternate geographic hold-outs; see
+[`experiments/geo_splits/`](experiments/geo_splits/)). Full list: `--help`.
 
 Sanity‑check the polygons before training:
 
@@ -123,9 +138,10 @@ python BoulderCalculator/scripts/visualize_coco_annotations.py --dataset-dir seg
 ## 6. Step 2 — Offline augmentation
 
 Multiplies the **train** split with exact geometric variants (polygons
-transformed to match); valid/test are copied unchanged. The default variant set
-is the full dihedral group (8×), e.g. ~111 → ~888 train images. Scale
-`--max-iter` up accordingly.
+transformed to match); valid/test are copied unchanged by default. The default
+variant set is the full dihedral group (8×), e.g. ~111 → ~888 train images.
+Scale `--max-iter` up accordingly. Pass `--splits train,valid,test` to
+offline-augment every split (geo-split weekend experiment).
 
 ```bash
 python BoulderCalculator/scripts/augment_coco_dataset.py --input-dir segmentation/coco_dataset_both --output-dir segmentation/coco_dataset_both_aug --jitter 0.15
@@ -189,6 +205,8 @@ All of these are flags on `train_boulder_local.py`:
 | `--image-size` | `2000` | Square train/test resize (lower for smoke tests) |
 | `--no-eval` | off | Skip periodic + final COCO eval (saves VRAM/time) |
 | `--no-rich-aug` | off | Disable the coastal aug stack (rotation/flips/scale/photometric); use resize‑only |
+| `--checkpoint-period` | 2000 if `max-iter>=1000`, else short-run formula | Write `model_XXXX.pth` every N iters |
+| `--eval-period` | 500 if `max-iter>=1000`, else short-run formula | Validation COCO eval every N iters (AP in `metrics.json`) |
 
 Notes:
 - `--resume` and `--weights` are different: resume continues a run from its
@@ -241,6 +259,35 @@ python BoulderCalculator/scripts/visualize_detection_errors.py --gt-json segment
 
 Writes per‑tile TP/FP/FN images plus `error_analysis_summary.json` whose
 `totals` include aggregate `precision` and `recall`.
+
+**Compare multiple training runs** (tables + learning curves from
+`metrics_valid.json` / `metrics.json`):
+
+```bash
+python BoulderCalculator/scripts/eval_compare_runs.py --segmentation-dir segmentation --geo-prefix training_run_geo_ --output-dir segmentation/eval_compare_geo
+```
+
+**Per‑tile AP / AR heatmaps** (and optional overlap merge for sliding‑window
+detections). Interactive walkthrough:
+[`experiments/eval/compare_training_runs.ipynb`](experiments/eval/compare_training_runs.ipynb);
+CLI details: [`experiments/eval/README.md`](experiments/eval/README.md).
+
+```bash
+python BoulderCalculator/scripts/eval_per_tile.py --gt-json segmentation/coco_geo_baseline/testing_annotations.json --image-dir segmentation/tiling_rgb_dsm_24 --image-dir segmentation/tiling_rgb_dsm_25 --model segmentation/training_run_geo_baseline/model_final.pth --four-band --device cuda --output-dir segmentation/eval_per_tile_baseline_test
+```
+
+(If `coco_geo_*_rgb_dsm` is a full dataset on disk you can pass `--dataset-dir` instead.
+Missing tiles are skipped by default — this laptop often has only a subset of 4‑band tiles.)
+
+Add `--merge-iou 0.4` to NMS‑merge duplicates within each tile before scoring.
+Pass several `--split-config` YAMLs to average the same per‑tile scores over each
+geo‑setup’s test membership (check whether baseline hold‑outs are intrinsically
+easier).
+
+**Provenance sidecars.** Dataset and training scripts write JSON next to their
+outputs (`dataset_provenance.json`, `training_run_provenance.json`, …) capturing
+flags such as jitter, drop/iscrowd modes, `--four-band`, and `--no-rich-aug`.
+See [§13](#13-per-script-cli-reference) (`run_provenance.py`).
 
 ## 12. Boulder matching
 
@@ -299,12 +346,21 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 **`scripts/gpkg_to_coco.py`** — GPKG + tiles → COCO.
 `--segmentation-dir`, `--years` (24,25), `--gpkg`, `--roi` (off),
 `--tiles-used`, `--output-dir`, `--min-area-m2` (0.0),
+`--drop-below-min-area` (omit small boulders instead of iscrowd),
+`--drop-deposits` (omit deposits instead of iscrowd/trainable),
 `--boulder-only`/`--no-boulder-only` (on), `--layer`, `--class-field` (Class),
-`--train-tiles`/`--valid-tiles`/`--test-tiles`.
+`--train-tiles`/`--valid-tiles`/`--test-tiles`,
+`--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline).
 
-**`scripts/augment_coco_dataset.py`** — offline train‑split aug.
+**`scripts/augment_coco_dataset.py`** — offline split aug.
 `--input-dir`*, `--output-dir`*, `--variants` (full dihedral 8×), `--jitter`
-(0.0), `--seed` (42).
+(0.0), `--seed` (42), `--splits` (default `train`; use `train,valid,test` to
+expand every split).
+
+**`scripts/materialize_geo_split_coco.py`** — filter a shared offline-aug pool
+into train/valid/test for one `--split-config`. Default `--link-mode auto`
+(hard link → symlink → copy). Smoke/weekend use `--link-mode hard` (Windows
+guest friendly, no extra disk).
 
 **`scripts/build_rgb_dsm_tiles.py`** — warp DSM onto ortho tiles.
 `--year`* (24|25), `--dsm` (year default), `--ortho-dir` (segmentation/tiling),
@@ -336,6 +392,27 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 
 **`scripts/coco_eval_with_recall.py`** — internal evaluator (no CLI); adds
 `AR1/AR10/AR100/ARs/ARm/ARl` to saved metrics.
+
+**`scripts/run_provenance.py`** — writes / shows sidecars that record dataset and
+training flags (`dataset_provenance.json`, `tiling_provenance.json`,
+`training_run_provenance.json`). Auto-written by `gpkg_to_coco`,
+`augment_coco_dataset`, `build_coco_rgb_dsm`, `build_rgb_dsm_tiles`,
+`materialize_geo_split_coco`, and `train_boulder_local`. Inspect with:
+
+```bash
+python BoulderCalculator/scripts/run_provenance.py segmentation/coco_dataset_both
+python BoulderCalculator/scripts/run_provenance.py segmentation/training_run_geo_baseline
+```
+
+**`scripts/eval_compare_runs.py`** — compare many `metrics_valid.json` + plot
+eval curves from `metrics.json`. `--runs name=path` (repeatable), or
+`--segmentation-dir` + `--geo-prefix` (default `training_run_geo_`),
+`--output-dir`, `--metrics` (defaults include AP50/AR100).
+
+**`scripts/eval_per_tile.py`** — per‑tile COCO AP/AR + precision/recall heatmaps.
+`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split` + `--model`;
+`--merge-iou` (optional NMS), `--extents` (GeoJSON for QGIS), `--split-config`
+(repeatable; difficulty summary), `--four-band`, `--device`, `--output-dir`*.
 
 **Matching** — see [§12](#12-boulder-matching) and `Matching/README.md`.
 

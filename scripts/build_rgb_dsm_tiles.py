@@ -272,6 +272,25 @@ def main() -> None:
     manifest.write_text(json.dumps(summary, indent=2))
     print(json.dumps({"tiles": len(summary), "output_dir": str(args.output_dir), "manifest": str(manifest)}, indent=2))
 
+    from run_provenance import write_tiling_provenance
+
+    write_tiling_provenance(
+        args.output_dir,
+        tool="build_rgb_dsm_tiles.py",
+        flags={
+            "year": args.year,
+            "dsm": str(args.dsm),
+            "ortho_dir": str(args.ortho_dir),
+            "dsm_mode": args.dsm_mode,
+            "relief_radius_m": args.relief_radius_m,
+            "from_coco": str(args.from_coco) if args.from_coco else None,
+            "tile_keys": args.tile_keys,
+        },
+        tiles_summary=summary,
+        parents=[args.ortho_dir, args.dsm],
+        extra={"legacy_manifest_file": "build_rgb_dsm_manifest.json"},
+    )
+
 
 if __name__ == "__main__":
     main()

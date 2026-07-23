@@ -16,12 +16,15 @@ Class attribute handling:
   - numeric 0 / missing / string "Boulder"  -> Boulder (COCO category 1)
   - numeric 1 / string containing "deposit" -> BoulderDeposit
 
-With ``--boulder-only`` (default), deposits and Boulder polygons smaller than
-``--min-area-m2`` are kept as COCO ``iscrowd=1`` ignore regions (same Boulder
-category). Train with ``train_boulder_local.py``, which treats those crowds as
-neither positives nor negatives. Use ``--no-boulder-only`` for a trainable
-two-class dataset (deposits as category 2; small boulders still become crowds
-when ``--min-area-m2`` > 0).
+Deposit / small-boulder handling (orthogonal flags):
+
+  - Deposits: ``iscrowd`` (``--boulder-only``, default) | trainable class 2
+    (``--no-boulder-only``) | omitted (``--drop-deposits``).
+  - Small boulders (``--min-area-m2`` > 0): ``iscrowd`` (default) | omitted
+    (``--drop-below-min-area``) | trainable (``--min-area-m2 0``).
+
+Train with ``train_boulder_local.py``, which treats ``iscrowd=1`` as neither
+positives nor negatives.
 
 Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
@@ -75,7 +78,6 @@ _TILES_USED_TEXT = """\
 13:5-13
 
 2024 tiles annotated:
-3:36
 4:44-46
 5:42-46
 6:40-45
@@ -108,7 +110,7 @@ def parse_col_spec(spec: str) -> list[int]:
 
 
 def parse_tiles_used_text(text: str) -> dict[int, list[str]]:
-    """Parse tiles_used.txt into {24: ['3_36', ...], 25: [...]}."""
+    """Parse tiles_used.txt into {24: [...], 25: [...]}."""
     by_year: dict[int, list[str]] = {24: [], 25: []}
     year: int | None = None
     for raw in text.splitlines():
@@ -147,7 +149,6 @@ TILES_25 = list(_DEFAULT_TILES[25])
 # EXCLUDED_* tiles abut hold-outs and are dropped from every split (spatial buffer).
 # Blocks: 12 segments along the coast PCA axis; valid={2,8}, test={5,11}.
 VALID_24 = [
-    "3_36",
     "7_38",
     "7_39",
     "8_37",
@@ -306,28 +307,75 @@ def tiles_for_year(year: int, tiles_by_year: dict[int, list[str]] | None = None)
     return [canonical_key(k) for k in source[year]]
 
 
+def _year_tile_map(raw: dict | None) -> dict[int, list[str]]:
+    """Normalize split-config year maps ({24: [...]} or {"24": [...]})."""
+    out: dict[int, list[str]] = {}
+    for year, keys in (raw or {}).items():
+        out[int(year)] = [canonical_key(k) for k in (keys or [])]
+    return out
+
+
+def load_split_config(path: Path) -> dict:
+    """Load a geographic split YAML/JSON (see experiments/geo_splits/)."""
+    text = path.read_text()
+    if path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise SystemExit(
+                f"Reading {path} needs PyYAML (pip install pyyaml), "
+                "or use a .json split config."
+            ) from exc
+        data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError(f"Split config must be a mapping: {path}")
+    data = dict(data)
+    data["valid"] = _year_tile_map(data.get("valid"))
+    data["test"] = _year_tile_map(data.get("test"))
+    data["excluded"] = _year_tile_map(data.get("excluded"))
+    check = str(data.get("leakage_check", "geographic")).strip().lower()
+    if check not in ("geographic", "location_consistency"):
+        raise ValueError(
+            f"leakage_check must be 'geographic' or 'location_consistency', got {check!r}"
+        )
+    data["leakage_check"] = check
+    data.setdefault("id", path.stem)
+    return data
+
+
 def expand_year_keys(
     years: list[int],
     tiles_by_year: dict[int, list[str]] | None = None,
+    split_config: dict | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     """Return (train, valid, test) year-prefixed keys for the given years.
 
     Hold-outs are geographic blocks shared across years (no footprint overlap
-    between train/valid/test). EXCLUDED_* tiles are omitted from every split.
+    between train/valid/test when using the default / buffered configs).
+    EXCLUDED_* tiles (or config ``excluded``) are omitted from every split.
     """
+    if split_config is None:
+        valid_by = {24: list(VALID_24), 25: list(VALID_25)}
+        test_by = {24: list(TEST_24), 25: list(TEST_25)}
+        excl_by = {24: list(EXCLUDED_24), 25: list(EXCLUDED_25)}
+    else:
+        valid_by = {24: [], 25: [], **split_config.get("valid", {})}
+        test_by = {24: [], 25: [], **split_config.get("test", {})}
+        excl_by = {24: [], 25: [], **split_config.get("excluded", {})}
+
     train, valid, test = [], [], []
     for year in years:
         tiles = tiles_for_year(year, tiles_by_year)
-        valid_set = {canonical_key(k) for k in (VALID_24 if year == 24 else VALID_25)}
-        test_set = {canonical_key(k) for k in (TEST_24 if year == 24 else TEST_25)}
-        excluded_set = {
-            canonical_key(k) for k in (EXCLUDED_24 if year == 24 else EXCLUDED_25)
-        }
+        valid_set = {canonical_key(k) for k in valid_by.get(year, [])}
+        test_set = {canonical_key(k) for k in test_by.get(year, [])}
+        excluded_set = {canonical_key(k) for k in excl_by.get(year, [])}
         missing_holdouts = sorted((valid_set | test_set) - set(tiles))
         if missing_holdouts:
             raise ValueError(
                 f"Hold-out tiles not in year {year} tile list: {missing_holdouts}. "
-                "Update VALID_*/TEST_* or tiles_used.txt."
+                "Update the split config or tiles_used.txt."
             )
         overlap_holdouts = sorted(valid_set & test_set)
         if overlap_holdouts:
@@ -394,6 +442,67 @@ def assert_no_geographic_leakage(
     check("train", train, "valid", valid)
     check("train", train, "test", test)
     check("valid", valid, "test", test)
+
+
+def assert_location_consistency(
+    tile_dir: Path,
+    train: list[str],
+    valid: list[str],
+    test: list[str],
+) -> None:
+    """Raise if greedily paired cross-year partners land in different splits.
+
+    Uses the same 1:1 opposite-year matching as generate_coastal_splits
+    (largest-overlap first). Same-year neighbors may differ across splits.
+    """
+    import rasterio
+
+    split_of = {yk: "train" for yk in train}
+    split_of.update({yk: "valid" for yk in valid})
+    split_of.update({yk: "test" for yk in test})
+    all_keys = list(split_of)
+
+    def bounds(yk: str) -> tuple[float, float, float, float]:
+        with rasterio.open(resolve_tile_path(tile_dir, yk)) as ds:
+            b = ds.bounds
+            return (b.left, b.bottom, b.right, b.top)
+
+    def overlap_area(
+        a: tuple[float, float, float, float], b: tuple[float, float, float, float]
+    ) -> float:
+        ix0 = max(a[0], b[0])
+        iy0 = max(a[1], b[1])
+        ix1 = min(a[2], b[2])
+        iy1 = min(a[3], b[3])
+        return max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+
+    cache = {yk: bounds(yk) for yk in all_keys}
+    keys_24 = [k for k in all_keys if k.startswith("24_")]
+    keys_25 = [k for k in all_keys if k.startswith("25_")]
+    pairs: list[tuple[float, str, str]] = []
+    for a in keys_24:
+        for b in keys_25:
+            area = overlap_area(cache[a], cache[b])
+            if area >= 1.0:
+                pairs.append((area, a, b))
+    pairs.sort(key=lambda t: t[0], reverse=True)
+
+    used: set[str] = set()
+    bad = []
+    for _area, a, b in pairs:
+        if a in used or b in used:
+            continue
+        used.add(a)
+        used.add(b)
+        if split_of[a] != split_of[b]:
+            bad.append((a, b, split_of[a], split_of[b]))
+    if bad:
+        sample = ", ".join(f"{a}/{b} ({sa}≠{sb})" for a, b, sa, sb in bad[:8])
+        more = f" (+{len(bad) - 8} more)" if len(bad) > 8 else ""
+        raise ValueError(
+            f"Location consistency failed: {len(bad)} cross-year pair(s) "
+            f"split apart. e.g. {sample}{more}"
+        )
 
 
 def resolve_tile_path(tile_dir: Path, key: str, year: int | None = None) -> Path:
@@ -664,6 +773,8 @@ def convert_tile(
     min_area_m2: float,
     boulder_only: bool,
     tile_year: int | None = None,
+    drop_below_min_area: bool = False,
+    drop_deposits: bool = False,
 ) -> tuple[dict, list[dict], int, dict]:
     with rasterio.open(image_path) as ds:
         transform = ds.transform
@@ -685,8 +796,14 @@ def convert_tile(
 
     annotations: list[dict] = []
     ann_id = ann_start_id
-    # keys: trainable boulder, crowd-ignored (deposit/small), trainable deposit
-    per_class = {"boulder": 0, "crowd": 0, "deposit": 0}
+    # trainable boulder / crowd / trainable deposit / omitted
+    per_class = {
+        "boulder": 0,
+        "crowd": 0,
+        "deposit": 0,
+        "dropped_small": 0,
+        "dropped_deposit": 0,
+    }
     for item in feats:
         geom, cls = item[0], item[1]
         feat_year = item[2] if len(item) > 2 else None
@@ -704,16 +821,23 @@ def convert_tile(
         # Decide crowd vs trainable before tile clip (area filter uses map units).
         is_crowd = 0
         ignore_reason = None
-        if cls == 1 and boulder_only:
-            # Single-class training: deposits become ignore regions.
-            is_crowd = 1
-            ignore_reason = "deposit"
-            category_id = 1
-        elif cls == 1:
-            category_id = 2
+        if cls == 1:
+            # BoulderDeposit: drop | iscrowd (boulder-only) | trainable class 2.
+            if drop_deposits:
+                per_class["dropped_deposit"] += 1
+                continue
+            if boulder_only:
+                is_crowd = 1
+                ignore_reason = "deposit"
+                category_id = 1
+            else:
+                category_id = 2
         else:
             category_id = 1
             if min_area_m2 > 0 and clipped.area < min_area_m2:
+                if drop_below_min_area:
+                    per_class["dropped_small"] += 1
+                    continue
                 is_crowd = 1
                 ignore_reason = "small"
 
@@ -760,6 +884,8 @@ def build_split(
     roi,
     min_area_m2: float,
     boulder_only: bool,
+    drop_below_min_area: bool = False,
+    drop_deposits: bool = False,
 ) -> dict:
     split_image_dir = output_dir / split_name
     split_image_dir.mkdir(parents=True, exist_ok=True)
@@ -768,9 +894,31 @@ def build_split(
     annotations: list[dict] = []
     image_id = 1
     ann_id = 1
-    per_class_total = {"boulder": 0, "crowd": 0, "deposit": 0}
-    categories = CATEGORIES_ONE if boulder_only else CATEGORIES_TWO
+    per_class_total = {
+        "boulder": 0,
+        "crowd": 0,
+        "deposit": 0,
+        "dropped_small": 0,
+        "dropped_deposit": 0,
+    }
+    # Two-class only when deposits are kept as trainable category 2.
+    two_class = (not boulder_only) and (not drop_deposits)
+    categories = CATEGORIES_TWO if two_class else CATEGORIES_ONE
     years_used: set[int] = set()
+
+    deposit_policy = (
+        "drop deposits"
+        if drop_deposits
+        else ("crowd-ignore deposits" if boulder_only else "trainable deposits")
+    )
+    if min_area_m2 > 0:
+        small_policy = (
+            "drop small"
+            if drop_below_min_area
+            else "crowd-ignore small"
+        )
+    else:
+        small_policy = "no min-area filter"
 
     for key in tile_keys:
         year, _ = parse_year_key(key)
@@ -789,6 +937,8 @@ def build_split(
             min_area_m2,
             boulder_only,
             tile_year=year,
+            drop_below_min_area=drop_below_min_area,
+            drop_deposits=drop_deposits,
         )
         image_info["file_name"] = dst_name
         images.append(image_info)
@@ -804,8 +954,7 @@ def build_split(
             "date_created": "",
             "description": (
                 f"Boulder training split: {split_name} "
-                f"(years={sorted(years_used)}; "
-                f"crowd-ignore deposits/small when boulder-only)"
+                f"(years={sorted(years_used)}; {deposit_policy}; {small_policy})"
             ),
             "url": "",
             "version": "3.1",
@@ -833,6 +982,8 @@ def build_split(
         "boulders": per_class_total["boulder"],
         "deposits": per_class_total["deposit"],
         "crowd_ignore": per_class_total["crowd"],
+        "dropped_small": per_class_total["dropped_small"],
+        "dropped_deposit": per_class_total["dropped_deposit"],
         "trainable": n_pos,
         "json": str(out_json),
         "image_dir": str(split_image_dir),
@@ -1033,7 +1184,27 @@ def main() -> None:
         default=0.0,
         help=(
             "Boulder polygons smaller than this (m2, ROI-clipped geom) become "
-            "COCO iscrowd=1 ignore regions instead of trainable GT. 0 = off."
+            "COCO iscrowd=1 ignore regions instead of trainable GT (unless "
+            "--drop-below-min-area). 0 = off."
+        ),
+    )
+    parser.add_argument(
+        "--drop-below-min-area",
+        action="store_true",
+        help=(
+            "With --min-area-m2 > 0: omit small boulders from the COCO entirely "
+            "instead of emitting them as iscrowd=1. Deposits are unchanged "
+            "(see --drop-deposits)."
+        ),
+    )
+    parser.add_argument(
+        "--drop-deposits",
+        action="store_true",
+        help=(
+            "Omit BoulderDeposit polygons from the COCO entirely (not trainable, "
+            "not iscrowd). Combines with --drop-below-min-area / --boulder-only "
+            "to experiment: no iscrowd, iscrowd-small-only, iscrowd-deposit-only, "
+            "or iscrowd both."
         ),
     )
     parser.add_argument(
@@ -1042,13 +1213,23 @@ def main() -> None:
         default=True,
         help=(
             "Emit a 1-class COCO dataset; BoulderDeposit polygons become "
-            "iscrowd=1 ignore regions (default: on). Use --no-boulder-only for "
-            "trainable deposits as category 2."
+            "iscrowd=1 ignore regions (default: on) unless --drop-deposits. "
+            "Use --no-boulder-only for trainable deposits as category 2 "
+            "(ignored when --drop-deposits)."
         ),
     )
     parser.add_argument("--train-tiles", type=str, default=None)
     parser.add_argument("--valid-tiles", type=str, default=None)
     parser.add_argument("--test-tiles", type=str, default=None)
+    parser.add_argument(
+        "--split-config",
+        type=Path,
+        default=None,
+        help=(
+            "YAML/JSON geographic split (valid/test/excluded per year). "
+            "Default: baked-in baseline hold-outs. See experiments/geo_splits/."
+        ),
+    )
     parser.add_argument(
         "--write-extents",
         action="store_true",
@@ -1068,11 +1249,21 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(f"Annotation GPKG not found: {path}")
 
+    split_config = load_split_config(args.split_config) if args.split_config else None
     tiles_by_year = resolve_tiles_by_year(seg_dir, args.tiles_used)
-    train_default, valid_default, test_default = expand_year_keys(years, tiles_by_year)
-    n_excluded = sum(
-        len(EXCLUDED_24 if y == 24 else EXCLUDED_25)
-        for y in years
+    train_default, valid_default, test_default = expand_year_keys(
+        years, tiles_by_year, split_config=split_config
+    )
+    if split_config is None:
+        n_excluded = sum(len(EXCLUDED_24 if y == 24 else EXCLUDED_25) for y in years)
+        split_id = "baseline"
+        leakage_check = "geographic"
+    else:
+        n_excluded = sum(len(split_config["excluded"].get(y, [])) for y in years)
+        split_id = split_config.get("id", args.split_config.stem)
+        leakage_check = split_config["leakage_check"]
+    print(
+        f"Split config: {split_id} (leakage_check={leakage_check})"
     )
     print(
         f"Splits: train={len(train_default)} valid={len(valid_default)} "
@@ -1084,14 +1275,26 @@ def main() -> None:
         + " test="
         + ",".join(test_default)
     )
-    # Verify no cross-year (or within-year) footprint overlap between splits.
+    # Verify leakage policy for this split config.
     try:
-        assert_no_geographic_leakage(
-            tile_dir, train_default, valid_default, test_default
-        )
-        print("Geographic leakage check: OK (no overlapping footprints across splits)")
+        if leakage_check == "location_consistency":
+            assert_location_consistency(
+                tile_dir, train_default, valid_default, test_default
+            )
+            print(
+                "Location consistency check: OK "
+                "(overlapping footprints stay in one split)"
+            )
+        else:
+            assert_no_geographic_leakage(
+                tile_dir, train_default, valid_default, test_default
+            )
+            print(
+                "Geographic leakage check: OK "
+                "(no overlapping footprints across splits)"
+            )
     except FileNotFoundError as exc:
-        print(f"Geographic leakage check skipped (missing tile): {exc}")
+        print(f"Leakage check skipped (missing tile): {exc}")
 
     if (
         args.no_roi
@@ -1114,11 +1317,18 @@ def main() -> None:
         )
     n_boulder = sum(1 for item in feats if item[1] == 0)
     n_deposit = sum(1 for item in feats if item[1] == 1)
-    mode = (
-        "boulder-only + crowd-ignore deposits/small"
-        if args.boulder_only
-        else "two-class (small boulders still crowd-ignored if --min-area-m2 > 0)"
-    )
+    if args.drop_deposits:
+        mode = "drop deposits"
+    elif args.boulder_only:
+        mode = "boulder-only + crowd-ignore deposits"
+    else:
+        mode = "two-class (trainable deposits)"
+    if args.min_area_m2 > 0:
+        mode += (
+            "; drop small boulders"
+            if args.drop_below_min_area
+            else "; crowd-ignore small boulders"
+        )
     src_desc = ", ".join(
         f"{p.name}:{y if y is not None else 'any'}" for p, y in gpkg_specs
     )
@@ -1166,6 +1376,8 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
+            drop_deposits=args.drop_deposits,
         ),
         build_split(
             "valid",
@@ -1176,6 +1388,8 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
+            drop_deposits=args.drop_deposits,
         ),
         build_split(
             "test",
@@ -1186,9 +1400,50 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
+            drop_below_min_area=args.drop_below_min_area,
+            drop_deposits=args.drop_deposits,
         ),
     ]
     print(json.dumps(summary, indent=2))
+
+    from run_provenance import write_dataset_provenance
+
+    deposits_mode = (
+        "drop"
+        if args.drop_deposits
+        else ("iscrowd" if args.boulder_only else "trainable_class")
+    )
+    small_boulder_mode = (
+        "trainable"
+        if args.min_area_m2 <= 0
+        else ("drop" if args.drop_below_min_area else "iscrowd")
+    )
+    write_dataset_provenance(
+        output_dir,
+        tool="gpkg_to_coco.py",
+        flags={
+            "years": years,
+            "min_area_m2": args.min_area_m2,
+            "boulder_only": bool(args.boulder_only),
+            "drop_below_min_area": bool(args.drop_below_min_area),
+            "drop_deposits": bool(args.drop_deposits),
+            "deposits_mode": deposits_mode,
+            "small_boulder_mode": small_boulder_mode,
+            "gpkg": [
+                {"path": str(p), "year": y} for p, y in gpkg_specs
+            ],
+            "roi": None
+            if (args.no_roi or args.roi is None or str(args.roi).lower() == "none")
+            else str(args.roi),
+            "split_config": str(args.split_config) if args.split_config else None,
+            "tiles_used": str(args.tiles_used) if args.tiles_used else None,
+            "n_train_tiles": len(train_tiles),
+            "n_valid_tiles": len(valid_tiles),
+            "n_test_tiles": len(test_tiles),
+        },
+        splits_summary=summary,
+        notes="COCO from GPKG; iscrowd/drop behavior summarized in deposits_mode / small_boulder_mode.",
+    )
 
 
 if __name__ == "__main__":

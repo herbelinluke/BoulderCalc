@@ -6,15 +6,18 @@ uses a NonAugmentationsTrainer -- i.e. augmentation was applied to the dataset
 itself before training, not on the fly. This script reproduces that: it reads a
 COCO dataset dir (as produced by gpkg_to_coco.py), applies deterministic
 geometric variants (flips / right-angle rotations) plus optional coastal
-photometric jitter to the TRAIN split, transforms the polygon annotations
-exactly, and writes a new dataset dir. Valid/test splits are copied through
-unchanged.
+photometric jitter, transforms the polygon annotations exactly, and writes a
+new dataset dir.
+
+By default only the train split is expanded (valid/test copied unchanged).
+Pass ``--splits train,valid,test`` to offline-augment every split (used by the
+geo-split weekend experiment).
 
 Online training (``train_boulder_local.py``) additionally applies full-circle
 rotation, scale jitter, blur, noise, and synthetic shadows via
-``boulder_augmentations.py`` for both the RGB crowd-ignore and RGB+DSM paths.
-Use this offline script for exact dihedral expansion; use online augs for the
-lossy / continuous transforms.
+``boulder_augmentations.py`` unless ``--no-rich-aug`` is set. Use this offline
+script for exact dihedral expansion; use online augs for the lossy / continuous
+transforms.
 
 Example:
     python BoulderCalculator/scripts/augment_coco_dataset.py \
@@ -22,6 +25,12 @@ Example:
         --output-dir segmentation/coco_dataset_v2_aug \
         --variants hflip,vflip,rot90,rot180,rot270 \
         --jitter 0.15
+
+    # Expand all splits (geo-split experiment):
+    python BoulderCalculator/scripts/augment_coco_dataset.py \
+        --input-dir segmentation/coco_baseline_rgb_dsm \
+        --output-dir segmentation/coco_baseline_rgb_dsm_aug \
+        --splits train,valid,test --jitter 0.15
 """
 
 from __future__ import annotations
@@ -45,6 +54,12 @@ VALID_VARIANTS = (
     "transpose",
     "antitranspose",
 )
+
+SPLIT_ANN = {
+    "train": "train_annotations.json",
+    "valid": "validation_annotations.json",
+    "test": "testing_annotations.json",
+}
 
 
 def load_image(path: Path) -> np.ndarray:
@@ -241,15 +256,17 @@ def transform_annotation(ann: dict, variant: str, w: int, h: int) -> dict:
     return new_ann
 
 
-def augment_train(
+def augment_split(
     input_dir: Path,
     output_dir: Path,
+    split: str,
     variants: list[str],
     jitter: float,
     seed: int,
 ) -> dict:
-    coco = json.loads((input_dir / "train_annotations.json").read_text())
-    out_img_dir = output_dir / "train"
+    ann_name = SPLIT_ANN[split]
+    coco = json.loads((input_dir / ann_name).read_text())
+    out_img_dir = output_dir / split
     out_img_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
 
@@ -263,7 +280,7 @@ def augment_train(
     ann_id = 1
 
     for image in coco["images"]:
-        src_path = input_dir / "train" / image["file_name"]
+        src_path = input_dir / split / image["file_name"]
         w, h = image["width"], image["height"]
         img = load_image(src_path)
         stem = Path(image["file_name"]).stem
@@ -306,10 +323,10 @@ def augment_train(
     out_coco = dict(coco)
     out_coco["images"] = new_images
     out_coco["annotations"] = new_annotations
-    (output_dir / "train_annotations.json").write_text(json.dumps(out_coco))
+    (output_dir / ann_name).write_text(json.dumps(out_coco))
 
     return {
-        "split": "train",
+        "split": split,
         "source_images": len(coco["images"]),
         "augmented_images": len(new_images),
         "source_annotations": len(coco["annotations"]),
@@ -326,6 +343,17 @@ def augment_train(
         if jitter > 0
         else [],
     }
+
+
+def augment_train(
+    input_dir: Path,
+    output_dir: Path,
+    variants: list[str],
+    jitter: float,
+    seed: int,
+) -> dict:
+    """Back-compat alias for augment_split(..., split='train')."""
+    return augment_split(input_dir, output_dir, "train", variants, jitter, seed)
 
 
 def copy_split(input_dir: Path, output_dir: Path, split: str, ann_name: str) -> dict:
@@ -362,6 +390,16 @@ def main() -> None:
         ),
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default="train",
+        help=(
+            "Comma-separated splits to offline-augment "
+            "(train, valid, test). Default: train only; other splits are copied. "
+            "Use train,valid,test for the geo-split weekend experiment."
+        ),
+    )
     args = parser.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -369,13 +407,50 @@ def main() -> None:
         if v not in VALID_VARIANTS:
             raise ValueError(f"Unknown variant: {v}")
 
+    augment_splits = [s.strip() for s in args.splits.split(",") if s.strip()]
+    for s in augment_splits:
+        if s not in SPLIT_ANN:
+            raise ValueError(f"Unknown split {s!r}; expected one of {list(SPLIT_ANN)}")
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    summary = [
-        augment_train(args.input_dir, args.output_dir, variants, args.jitter, args.seed),
-        copy_split(args.input_dir, args.output_dir, "valid", "validation_annotations.json"),
-        copy_split(args.input_dir, args.output_dir, "test", "testing_annotations.json"),
-    ]
+    summary = []
+    for split, ann_name in SPLIT_ANN.items():
+        if split in augment_splits:
+            # Distinct seed per split so jitter patterns differ.
+            split_seed = args.seed + {"train": 0, "valid": 1, "test": 2}[split]
+            summary.append(
+                augment_split(
+                    args.input_dir,
+                    args.output_dir,
+                    split,
+                    variants,
+                    args.jitter,
+                    split_seed,
+                )
+            )
+        else:
+            summary.append(
+                copy_split(args.input_dir, args.output_dir, split, ann_name)
+            )
     print(json.dumps(summary, indent=2))
+
+    from run_provenance import write_dataset_provenance
+
+    write_dataset_provenance(
+        args.output_dir,
+        tool="augment_coco_dataset.py",
+        flags={
+            "jitter": args.jitter,
+            "jitter_enabled": args.jitter > 0,
+            "variants": variants,
+            "seed": args.seed,
+            "splits_augmented": augment_splits,
+            "input_dir": str(args.input_dir),
+        },
+        splits_summary=summary,
+        parents=[args.input_dir],
+        notes="Offline geometric (+ optional photometric jitter) augmentation.",
+    )
 
 
 if __name__ == "__main__":

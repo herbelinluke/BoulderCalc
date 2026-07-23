@@ -42,12 +42,14 @@ Matching/
     │   ├── attributes.py
     │   ├── dedupe.py
     │   ├── qc.py
+    │   ├── evaluate_matches.py
     │   └── visualize.py
     ├── matching_tests/
     │   ├── generate_test_data.py
     │   ├── check_results.py
     │   ├── test_matcher.py
-    │   └── test_dedupe_qc.py
+    │   ├── test_dedupe_qc.py
+    │   └── test_evaluate_matches.py
     └── requirements.txt
 ```
 
@@ -136,6 +138,31 @@ run the 4-band model on both years, match, and write side-by-side shots.
 ./run_training_run_match.sh --gui-only      # browse existing results (no inference)
 ./run_training_run_match.sh --screenshots-only
 ```
+
+## Matcher evaluation labeling
+
+Build a human-labeled eval set by flipping through inferred matches and
+marking each as confirmed / not-a-match / unsure:
+
+``` bash
+./run_match_eval.sh
+# or:
+python -m matching.evaluate_matches \
+  --outdir ../../segmentation/training_run_rgb_dsm_4000/matching
+```
+
+Keys: `y` confirm, `x` not a match, `?` unsure, `j` next unlabeled,
+`c` print QGIS extent/centroids, `s` save, `q` save+quit, `n`/`p` navigate.
+
+Writes:
+
+-   `<outdir>/eval/match_labels.json` — full records (centroids, bbox, WKT,
+    score, distance, `intersects` + GPKG `fid`s vs `july14_24` / `july14_25`)
+-   `<outdir>/eval/match_labels.geojson` — point layer for QGIS (after centroid)
+
+GPKG `fid`s are stable when you *append* annotations; they can change if
+features are deleted/recreated — `intersects` remains the durable flag.
+Purple outlines on the detail panels are nearby manual annotations.
 
 ## Matching Method
 

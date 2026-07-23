@@ -105,6 +105,22 @@ def main() -> None:
     (args.output_dir / "build_coco_rgb_dsm_summary.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
 
+    from run_provenance import write_dataset_provenance
+
+    write_dataset_provenance(
+        args.output_dir,
+        tool="build_coco_rgb_dsm.py",
+        flags={
+            "source_coco": str(args.source_coco),
+            "tile_dirs": [str(d) for d in args.tile_dirs],
+            "four_band": True,
+        },
+        splits_summary=summary,
+        parents=[args.source_coco, *args.tile_dirs],
+        notes="COCO annotations from source RGB dataset; images replaced with 4-band RGB+DSM tiles.",
+        extra={"legacy_summary_file": "build_coco_rgb_dsm_summary.json"},
+    )
+
 
 if __name__ == "__main__":
     main()
