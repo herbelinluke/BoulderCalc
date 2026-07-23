@@ -107,7 +107,7 @@ def parse_col_spec(spec: str) -> list[int]:
 
 
 def parse_tiles_used_text(text: str) -> dict[int, list[str]]:
-    """Parse tiles_used.txt into {24: ['3_36', ...], 25: [...]}."""
+    """Parse tiles_used.txt into {24: [...], 25: [...]}."""
     by_year: dict[int, list[str]] = {24: [], 25: []}
     year: int | None = None
     for raw in text.splitlines():
@@ -146,7 +146,6 @@ TILES_25 = list(_DEFAULT_TILES[25])
 # EXCLUDED_* tiles abut hold-outs and are dropped from every split (spatial buffer).
 # Blocks: 12 segments along the coast PCA axis; valid={2,8}, test={5,11}.
 VALID_24 = [
-    "3_36",
     "7_38",
     "7_39",
     "8_37",

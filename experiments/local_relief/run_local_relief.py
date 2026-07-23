@@ -54,7 +54,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--image-size", type=int, default=None)
     parser.add_argument("--max-iter", type=int, default=None)
-    parser.add_argument("--min-area-m2", type=float, default=1.0)
+    parser.add_argument("--min-area-m2", type=float, default=1.5)
     parser.add_argument("--relief-radius-m", type=float, default=10.0)
     parser.add_argument("--checkpoint-period", type=int, default=None)
     parser.add_argument("--eval-period", type=int, default=None)
