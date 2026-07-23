@@ -1,10 +1,12 @@
 """Interactive labeling UI for building a matcher evaluation dataset.
 
-Flip through inferred matches (same layout as ``visualize.run_gui``), label each
-as a confirmed match / not-a-match / unsure, and append records to a JSON file.
+Flip through inferred matches and missed-match candidates (same layout as
+``visualize.run_gui``), label each as confirmed / not-a-match / unsure, tag
+boulder/deposit/isolated flags, and append records to a JSON file.
 
-Each record stores centroids, bbox, WKT polygons, matcher score, and whether
-the detections intersect the manual annotation GPKGs (july14_24 / july14_25),
+Each record stores centroids, bbox, WKT polygons, matcher score, volumes,
+``source_queue`` (``matcher`` vs ``missed_candidate``), and whether the
+detections intersect the manual annotation GPKGs (july14_24 / july14_25),
 including GeoPackage ``fid`` values when available (stable under appends).
 
 Example:
@@ -13,17 +15,23 @@ Example:
     --labels-json ../../segmentation/training_run_rgb_dsm_4000/matching/eval/match_labels.json
 
 Keys:
-  n / →     next match
-  p / ←     previous match
-  y         label CONFIRMED MATCH
-  x         label NOT A MATCH
-  ? / u     label UNSURE
-  backspace clear label for current match
+  y         confirm match
+  x         not match
+  ?         unsure
+  b         boulder
+  z         not boulder
+  d         deposit
+  i         isolated
+  m         cycle queue mode: matcher matches ↔ missed candidates (appeared↔disappeared)
+  j         next unlabeled
+  c         print coords / volumes
+  s         save
+  q         quit
+  n / p     next / previous
   o         toggle overview zoom
-  j         jump to next unlabeled
-  c         print QGIS-friendly extent / centroids to terminal
-  s / Ctrl+s save JSON (+ companion GeoJSON for QGIS)
-  q         save and quit
+  Shift+b   clear boulder flag
+  Shift+d   clear deposit flag
+  backspace clear match label only (keeps boulder/deposit/isolated flags)
 """
 
 from __future__ import annotations
@@ -56,6 +64,13 @@ LABEL_NOT = "not_match"
 LABEL_UNSURE = "unsure"
 VALID_LABELS = {LABEL_CONFIRMED, LABEL_NOT, LABEL_UNSURE}
 
+BOULDER_YES = "boulder"
+BOULDER_NO = "not_boulder"
+VALID_BOULDER_FLAGS = {BOULDER_YES, BOULDER_NO}
+
+SOURCE_MATCHER = "matcher"
+SOURCE_MISSED = "missed_candidate"
+
 LABEL_COLORS = {
     LABEL_CONFIRMED: "#2ecc71",
     LABEL_NOT: "#e74c3c",
@@ -71,12 +86,23 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _fmt_vol(v) -> str:
+    if v is None:
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if np.isnan(f):
+        return "—"
+    return f"{f:.3f} m³"
+
+
 def load_manual_annotations(path: Path, target_crs: str = "EPSG:25829") -> gpd.GeoDataFrame:
     """Load a GPKG/GeoJSON, keep GeoPackage ``fid`` when present, reproject."""
     if not path.exists():
         raise FileNotFoundError(path)
 
-    # Prefer pyogrio so GPKG fid is preserved as the index.
     try:
         gdf = gpd.read_file(path, engine="pyogrio", fid_as_index=True)
         gdf = gdf.reset_index()
@@ -151,9 +177,7 @@ def annotation_hits(
                 best_iou = iou
                 best_fid = fid
 
-    # Always mark intersects if any spatial intersect, even with low IoU
     intersects = True
-    # Prefer fids that meet min_iou; if none, still list any intersecting fid
     if not hits:
         for _, row in cand.iterrows():
             fid = int(row["ann_fid"]) if "ann_fid" in row.index and row["ann_fid"] is not None else None
@@ -172,6 +196,13 @@ def annotation_hits(
 
 def match_key(before_id, after_id) -> str:
     return f"b{int(before_id)}_a{int(after_id)}"
+
+
+def label_id_for(before_id, after_id, source_queue: str = SOURCE_MATCHER) -> str:
+    base = match_key(before_id, after_id)
+    if source_queue == SOURCE_MISSED:
+        return f"missed_{base}"
+    return base
 
 
 def geom_record(geom, crs: str = "EPSG:25829") -> dict | None:
@@ -198,6 +229,18 @@ def qgis_extent_string(bounds, pad_m: float = 5.0) -> str:
     )
 
 
+def _maybe_float(v):
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(f):
+        return None
+    return f
+
+
 def build_pair_record(
     match_row,
     before_geom,
@@ -207,10 +250,14 @@ def build_pair_record(
     label: str | None,
     note: str = "",
     min_iou: float = 0.05,
+    source_queue: str = SOURCE_MATCHER,
+    boulder_flag: str | None = None,
+    deposit_flag: bool | None = None,
+    isolated: bool | None = None,
 ) -> dict:
     before_id = int(match_row["before_id"])
     after_id = int(match_row["after_id"])
-    key = match_key(before_id, after_id)
+    lid = label_id_for(before_id, after_id, source_queue)
 
     before_rec = geom_record(before_geom)
     after_rec = geom_record(after_geom)
@@ -246,10 +293,14 @@ def build_pair_record(
     )
 
     return {
-        "label_id": key,
+        "label_id": lid,
         "before_id": before_id,
         "after_id": after_id,
         "label": label,
+        "boulder_flag": boulder_flag,
+        "deposit_flag": deposit_flag,
+        "isolated": isolated,
+        "source_queue": source_queue,
         "note": note,
         "labeled_at": _utc_now() if label else None,
         "match_score": float(match_row.get("match_score", np.nan)),
@@ -287,24 +338,11 @@ def build_pair_record(
     }
 
 
-def _maybe_float(v):
-    if v is None:
-        return None
-    try:
-        f = float(v)
-    except (TypeError, ValueError):
-        return None
-    if np.isnan(f):
-        return None
-    return f
-
-
 def load_labels_db(path: Path) -> dict:
     if path.exists():
         data = json.loads(path.read_text())
         if "labels" not in data:
             data["labels"] = {}
-        # Support list or dict form
         if isinstance(data["labels"], list):
             data["labels"] = {r["label_id"]: r for r in data["labels"] if "label_id" in r}
         return data
@@ -314,9 +352,21 @@ def load_labels_db(path: Path) -> dict:
         "updated_at": _utc_now(),
         "description": (
             "Human labels for boulder matcher evaluation. "
-            "confirmed_match / not_match / unsure."
+            "confirmed_match / not_match / unsure; boulder / not_boulder / deposit / isolated."
         ),
         "labels": {},
+    }
+
+
+def _label_counts(labels: list[dict]) -> dict:
+    return {
+        LABEL_CONFIRMED: sum(1 for r in labels if r.get("label") == LABEL_CONFIRMED),
+        LABEL_NOT: sum(1 for r in labels if r.get("label") == LABEL_NOT),
+        LABEL_UNSURE: sum(1 for r in labels if r.get("label") == LABEL_UNSURE),
+        BOULDER_YES: sum(1 for r in labels if r.get("boulder_flag") == BOULDER_YES),
+        BOULDER_NO: sum(1 for r in labels if r.get("boulder_flag") == BOULDER_NO),
+        "in_deposit": sum(1 for r in labels if r.get("deposit_flag") is True),
+        "isolated": sum(1 for r in labels if r.get("isolated") is True),
     }
 
 
@@ -324,16 +374,11 @@ def save_labels_db(db: dict, path: Path, also_geojson: bool = True) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     db = deepcopy(db)
     db["updated_at"] = _utc_now()
-    # Persist labels as a sorted list for readability / diffs
     labels_dict = db.get("labels", {})
     if isinstance(labels_dict, dict):
         db["labels"] = [labels_dict[k] for k in sorted(labels_dict.keys())]
         db["n_labels"] = len(db["labels"])
-        db["counts"] = {
-            LABEL_CONFIRMED: sum(1 for r in db["labels"] if r.get("label") == LABEL_CONFIRMED),
-            LABEL_NOT: sum(1 for r in db["labels"] if r.get("label") == LABEL_NOT),
-            LABEL_UNSURE: sum(1 for r in db["labels"] if r.get("label") == LABEL_UNSURE),
-        }
+        db["counts"] = _label_counts(db["labels"])
 
     path.write_text(json.dumps(db, indent=2))
     print(f"Saved {path}  ({db.get('n_labels', 0)} labels  {db.get('counts')})")
@@ -361,10 +406,16 @@ def _export_qgis_geojson(db: dict, path: Path) -> None:
         props = {
             "label_id": rec.get("label_id"),
             "label": rec.get("label"),
+            "boulder_flag": rec.get("boulder_flag"),
+            "deposit_flag": rec.get("deposit_flag"),
+            "isolated": rec.get("isolated"),
+            "source_queue": rec.get("source_queue"),
             "before_id": rec.get("before_id"),
             "after_id": rec.get("after_id"),
             "match_score": rec.get("match_score"),
             "distance_m": rec.get("distance_m"),
+            "before_volume": rec.get("before_volume"),
+            "after_volume": rec.get("after_volume"),
             "before_cx": before.get("centroid_x"),
             "before_cy": before.get("centroid_y"),
             "after_cx": after.get("centroid_x"),
@@ -407,6 +458,18 @@ def _ensure_ids(gdf: gpd.GeoDataFrame | None, col: str) -> gpd.GeoDataFrame | No
     return gdf
 
 
+def _record_has_data(rec: dict) -> bool:
+    if rec.get("label") in VALID_LABELS:
+        return True
+    if rec.get("boulder_flag") in VALID_BOULDER_FLAGS:
+        return True
+    if rec.get("deposit_flag") is True:
+        return True
+    if rec.get("isolated") is True:
+        return True
+    return False
+
+
 def run_eval_gui(
     results: dict[str, gpd.GeoDataFrame],
     before: gpd.GeoDataFrame | None,
@@ -417,14 +480,21 @@ def run_eval_gui(
     before_raster: Path | None = None,
     after_raster: Path | None = None,
     pair_tiles: list[tuple[str, str]] | None = None,
+    missed_candidates: gpd.GeoDataFrame | None = None,
     pad_m: float = 8.0,
     overview_pad_m: float = 25.0,
     meta: dict | None = None,
     min_iou: float = 0.05,
 ):
     matches = results["matches"].sort_values("match_score", ascending=False).reset_index(drop=True)
-    if matches.empty:
-        raise SystemExit("No matches to evaluate.")
+    missed = (
+        missed_candidates.sort_values("match_score", ascending=False).reset_index(drop=True)
+        if missed_candidates is not None and not missed_candidates.empty
+        else gpd.GeoDataFrame(geometry=[], crs="EPSG:25829")
+    )
+
+    if matches.empty and missed.empty:
+        raise SystemExit("No matcher matches or missed candidates to evaluate.")
 
     before = _ensure_ids(before, "before_id")
     after = _ensure_ids(after, "after_id")
@@ -437,10 +507,17 @@ def run_eval_gui(
         labels = {r["label_id"]: r for r in labels}
         db["labels"] = labels
 
-    # Precompute annotation hits for status display speed
     cache: dict[str, dict] = {}
 
-    def _record_for(row, label=None, note=""):
+    def _record_for(
+        row,
+        label=None,
+        note="",
+        source_queue=SOURCE_MATCHER,
+        boulder_flag=None,
+        deposit_flag=None,
+        isolated=None,
+    ):
         before_geom, after_geom = _match_pair_geoms(row, before, after)
         return build_pair_record(
             row,
@@ -451,23 +528,57 @@ def run_eval_gui(
             label=label,
             note=note,
             min_iou=min_iou,
+            source_queue=source_queue,
+            boulder_flag=boulder_flag,
+            deposit_flag=deposit_flag,
+            isolated=isolated,
         )
 
-    for _, row in matches.iterrows():
-        key = match_key(row["before_id"], row["after_id"])
-        if key not in cache:
-            # Keep existing label if present
-            existing = labels.get(key)
-            lab = existing.get("label") if existing else None
-            note = existing.get("note", "") if existing else ""
-            cache[key] = _record_for(row, label=lab, note=note)
-            if existing and existing.get("label"):
-                # Preserve original labeled_at if already labeled
-                if existing.get("labeled_at"):
-                    cache[key]["labeled_at"] = existing["labeled_at"]
-                labels[key] = cache[key]
+    def _merge_existing(row, source_queue: str, existing: dict | None) -> dict:
+        lab = existing.get("label") if existing else None
+        note = existing.get("note", "") if existing else ""
+        boulder_flag = existing.get("boulder_flag") if existing else None
+        deposit_flag = existing.get("deposit_flag") if existing else None
+        isolated = existing.get("isolated") if existing else None
+        rec = _record_for(
+            row,
+            label=lab,
+            note=note,
+            source_queue=source_queue,
+            boulder_flag=boulder_flag,
+            deposit_flag=deposit_flag,
+            isolated=isolated,
+        )
+        if existing:
+            if existing.get("labeled_at") and lab:
+                rec["labeled_at"] = existing["labeled_at"]
+            if existing.get("source_queue"):
+                rec["source_queue"] = existing["source_queue"]
+        return rec
 
-    state = {"idx": 0, "overview_zoomed": True, "dirty": False}
+    for _, row in matches.iterrows():
+        lid = label_id_for(row["before_id"], row["after_id"], SOURCE_MATCHER)
+        existing = labels.get(lid)
+        rec = _merge_existing(row, SOURCE_MATCHER, existing)
+        cache[lid] = rec
+        if _record_has_data(rec):
+            labels[lid] = rec
+
+    for _, row in missed.iterrows():
+        lid = label_id_for(row["before_id"], row["after_id"], SOURCE_MISSED)
+        existing = labels.get(lid)
+        rec = _merge_existing(row, SOURCE_MISSED, existing)
+        cache[lid] = rec
+        if _record_has_data(rec):
+            labels[lid] = rec
+
+    initial_mode = "matches" if not matches.empty else "missed"
+    state = {
+        "idx": 0,
+        "mode": initial_mode,
+        "overview_zoomed": True,
+        "dirty": False,
+    }
 
     fig = plt.figure(figsize=(17, 8))
     ax_overview = fig.add_subplot(1, 3, 1)
@@ -490,12 +601,23 @@ def run_eval_gui(
         transform=status_ax.transAxes,
     )
 
+    def _source_queue() -> str:
+        return SOURCE_MISSED if state["mode"] == "missed" else SOURCE_MATCHER
+
+    def _current_queue() -> gpd.GeoDataFrame:
+        return missed if state["mode"] == "missed" else matches
+
+    def _queue_len() -> int:
+        return len(_current_queue())
+
     def _full_extent():
         geoms = []
-        for key in ("matches", "appeared", "disappeared", "vectors"):
+        for key in ("matches", "appeared", "disappeared", "vectors", "missed_candidates"):
             gdf = results.get(key)
             if gdf is not None and not gdf.empty:
                 geoms.extend(list(gdf.geometry))
+        if missed is not None and not missed.empty and "missed_candidates" not in results:
+            geoms.extend(list(missed.geometry))
         if not geoms:
             return None
         minx = min(g.bounds[0] for g in geoms)
@@ -508,25 +630,49 @@ def run_eval_gui(
     full_extent = _full_extent()
 
     def _current_row():
-        return matches.iloc[state["idx"]]
+        return _current_queue().iloc[state["idx"]]
 
-    def _current_key():
+    def _current_label_id() -> str:
         row = _current_row()
-        return match_key(row["before_id"], row["after_id"])
+        return label_id_for(row["before_id"], row["after_id"], _source_queue())
+
+    def _flag_summary(rec: dict) -> str:
+        parts = []
+        bf = rec.get("boulder_flag")
+        if bf == BOULDER_YES:
+            parts.append("BOULDER")
+        elif bf == BOULDER_NO:
+            parts.append("NOT_BOULDER")
+        if rec.get("deposit_flag") is True:
+            parts.append("DEPOSIT")
+        if rec.get("isolated") is True:
+            parts.append("ISOLATED")
+        return "  ".join(parts) if parts else "—"
 
     def _status_lines(row, rec) -> str:
         lab = rec.get("label") or "UNLABELED"
-        n_done = sum(1 for r in labels.values() if r.get("label") in VALID_LABELS)
+        n_done = sum(
+            1
+            for _, r in _current_queue().iterrows()
+            if (labels.get(label_id_for(r["before_id"], r["after_id"], _source_queue())) or {}).get(
+                "label"
+            )
+            in VALID_LABELS
+        )
         m24 = rec.get("manual_ann_24") or {}
         m25 = rec.get("manual_ann_25") or {}
         b = rec.get("before") or {}
         a = rec.get("after") or {}
         f24 = ",".join(str(f) for f in m24.get("fids", [])[:6]) or "-"
         f25 = ",".join(str(f) for f in m25.get("fids", [])[:6]) or "-"
+        mode_name = "MISSED CANDIDATES" if state["mode"] == "missed" else "MATCHER MATCHES"
         return (
-            f"[{state['idx']+1}/{len(matches)}]  {rec['label_id']}  LABEL={lab}  "
-            f"scored={n_done}/{len(matches)}  score={rec.get('match_score', float('nan')):.3f}  "
+            f"MODE={mode_name}  [{state['idx']+1}/{_queue_len()}]  {rec['label_id']}  "
+            f"LABEL={lab}  flags={_flag_summary(rec)}  scored={n_done}/{_queue_len()}  "
+            f"score={rec.get('match_score', float('nan')):.3f}  "
             f"dist={rec.get('distance_m', float('nan')):.2f}m\n"
+            f"vol before={_fmt_vol(rec.get('before_volume'))}  "
+            f"after={_fmt_vol(rec.get('after_volume'))}   "
             f"before centroid: {b.get('centroid_x', float('nan')):.3f}, "
             f"{b.get('centroid_y', float('nan')):.3f}   "
             f"after: {a.get('centroid_x', float('nan')):.3f}, "
@@ -534,8 +680,8 @@ def run_eval_gui(
             f"QGIS extent: {rec.get('qgis_extent')}\n"
             f"manual24 intersect={m24.get('intersects')} fids=[{f24}] iou={m24.get('best_iou')}   "
             f"manual25 intersect={m25.get('intersects')} fids=[{f25}] iou={m25.get('best_iou')}\n"
-            f"keys: y=confirm  x=not-match  ?=unsure  Bksp=clear  j=next unlabeled  "
-            f"c=print coords  s=save  n/p=nav  o=zoom  q=quit"
+            f"keys: y=confirm  x=not-match  ?=unsure  b=boulder  z=not-boulder  d=deposit  "
+            f"i=isolated  m=mode  Bksp=clear label  j=next unlabeled  c=print  s=save  n/p  o  q"
         )
 
     def _apply_overview_zoom(row):
@@ -556,13 +702,14 @@ def run_eval_gui(
 
     def redraw():
         row = _current_row()
-        key = _current_key()
-        rec = labels.get(key) or cache.get(key) or _record_for(row)
+        key = _current_label_id()
+        rec = labels.get(key) or cache.get(key) or _record_for(row, source_queue=_source_queue())
         cache[key] = rec
 
         ax_overview.cla()
         lab = rec.get("label")
-        title = f"Overview  label={lab or 'UNLABELED'}"
+        mode_tag = "missed" if state["mode"] == "missed" else "match"
+        title = f"Overview ({mode_tag})  label={lab or 'UNLABELED'}"
         plot_overview(results, ax=ax_overview, title=title)
         before_geom, after_geom = _match_pair_geoms(row, before, after)
         edge = LABEL_COLORS.get(lab, "yellow")
@@ -592,7 +739,13 @@ def run_eval_gui(
             axes=detail_axes,
             draw_vector=True,
         )
-        # Overlay manual annotation outlines (thin) if present in view
+        detail_axes[0].set_title(
+            f"2024 (before)  vol={_fmt_vol(rec.get('before_volume'))}"
+        )
+        detail_axes[1].set_title(
+            f"2025 (after)  vol={_fmt_vol(rec.get('after_volume'))}"
+        )
+
         bounds = None
         if before_geom is not None or after_geom is not None:
             from .visualize import _match_bounds
@@ -637,7 +790,8 @@ def run_eval_gui(
                     )
 
         detail_axes[1].set_xlabel(
-            f"Match {state['idx'] + 1}/{len(matches)}  |  y confirm · x reject · ? unsure"
+            f"{state['mode'].capitalize()} {state['idx'] + 1}/{_queue_len()}  |  "
+            f"y confirm · x reject · ? unsure · b/z/d/i flags · m toggle queue"
         )
         status_text.set_text(_status_lines(row, rec))
         if lab in LABEL_COLORS:
@@ -646,45 +800,102 @@ def run_eval_gui(
             status_text.set_color("0.15")
         fig.canvas.draw_idle()
 
+    def _existing_flags(key: str) -> tuple:
+        existing = labels.get(key) or cache.get(key) or {}
+        return (
+            existing.get("boulder_flag"),
+            existing.get("deposit_flag"),
+            existing.get("isolated"),
+            existing.get("note", ""),
+            existing.get("labeled_at"),
+        )
+
+    def _store_record(rec: dict):
+        key = rec["label_id"]
+        cache[key] = rec
+        if _record_has_data(rec):
+            labels[key] = rec
+        else:
+            labels.pop(key, None)
+        state["dirty"] = True
+
     def set_label(label: str | None):
         row = _current_row()
-        key = _current_key()
+        key = _current_label_id()
+        boulder_flag, deposit_flag, isolated, note, labeled_at = _existing_flags(key)
+
         if label is None:
-            if key in labels:
-                # Keep geometry cache but clear label
-                rec = cache.get(key) or _record_for(row)
-                rec = dict(rec)
-                rec["label"] = None
-                rec["labeled_at"] = None
-                cache[key] = rec
-                labels.pop(key, None)
-            state["dirty"] = True
+            rec = _record_for(
+                row,
+                label=None,
+                note=note,
+                source_queue=_source_queue(),
+                boulder_flag=boulder_flag,
+                deposit_flag=deposit_flag,
+                isolated=isolated,
+            )
+            _store_record(rec)
             redraw()
             return
 
-        note = (labels.get(key) or {}).get("note", "")
-        rec = _record_for(row, label=label, note=note)
-        cache[key] = rec
-        labels[key] = rec
-        state["dirty"] = True
+        rec = _record_for(
+            row,
+            label=label,
+            note=note,
+            source_queue=_source_queue(),
+            boulder_flag=boulder_flag,
+            deposit_flag=deposit_flag,
+            isolated=isolated,
+        )
+        if labeled_at and (labels.get(key) or {}).get("label") == label:
+            rec["labeled_at"] = labeled_at
+        _store_record(rec)
         redraw()
-        # Auto-advance to next unlabeled after labeling
         _goto_next_unlabeled(prefer_advance=True)
 
+    def _update_flags(
+        boulder_flag=..., deposit_flag=..., isolated=...
+    ):
+        row = _current_row()
+        key = _current_label_id()
+        existing = labels.get(key) or cache.get(key) or {}
+        lab = existing.get("label")
+        note = existing.get("note", "")
+        bf = existing.get("boulder_flag") if boulder_flag is ... else boulder_flag
+        df = existing.get("deposit_flag") if deposit_flag is ... else deposit_flag
+        iso = existing.get("isolated") if isolated is ... else isolated
+        rec = _record_for(
+            row,
+            label=lab,
+            note=note,
+            source_queue=_source_queue(),
+            boulder_flag=bf,
+            deposit_flag=df,
+            isolated=iso,
+        )
+        if existing.get("labeled_at"):
+            rec["labeled_at"] = existing["labeled_at"]
+        _store_record(rec)
+        redraw()
+
     def _goto_next_unlabeled(prefer_advance: bool = False):
+        queue = _current_queue()
         start = state["idx"]
-        n = len(matches)
+        n = len(queue)
+        if n == 0:
+            return
         begin = (start + 1) % n if prefer_advance else start
+        sq = _source_queue()
         for k in range(n):
             i = (begin + k) % n
-            row = matches.iloc[i]
-            key = match_key(row["before_id"], row["after_id"])
-            lab = (labels.get(key) or {}).get("label")
+            row = queue.iloc[i]
+            lid = label_id_for(row["before_id"], row["after_id"], sq)
+            lab = (labels.get(lid) or {}).get("label")
             if lab not in VALID_LABELS:
                 state["idx"] = i
                 redraw()
                 return
-        print("All matches labeled.")
+        print(f"All items in {state['mode']} queue labeled.")
         redraw()
 
     def do_save():
@@ -693,44 +904,77 @@ def run_eval_gui(
         state["dirty"] = False
 
     def print_coords():
-        key = _current_key()
+        key = _current_label_id()
         rec = labels.get(key) or cache.get(key)
         if not rec:
             return
         b = rec.get("before") or {}
         a = rec.get("after") or {}
         print("\n—— QGIS lookup ——")
-        print(f"label_id: {rec['label_id']}  label={rec.get('label')}")
+        print(
+            f"label_id: {rec['label_id']}  label={rec.get('label')}  "
+            f"source={rec.get('source_queue')}  flags={_flag_summary(rec)}"
+        )
         print(f"extent:   {rec.get('qgis_extent')}")
         print(
             f"before:   {b.get('centroid_x'):.3f}, {b.get('centroid_y'):.3f}  "
-            f"(EPSG:25829)"
+            f"vol={_fmt_vol(rec.get('before_volume'))}  (EPSG:25829)"
         )
         print(
             f"after:    {a.get('centroid_x'):.3f}, {a.get('centroid_y'):.3f}  "
-            f"(EPSG:25829)"
+            f"vol={_fmt_vol(rec.get('after_volume'))}  (EPSG:25829)"
         )
-        print(f"manual24: intersects={rec['manual_ann_24'].get('intersects')} "
-              f"fids={rec['manual_ann_24'].get('fids')}")
-        print(f"manual25: intersects={rec['manual_ann_25'].get('intersects')} "
-              f"fids={rec['manual_ann_25'].get('fids')}")
+        print(
+            f"manual24: intersects={rec['manual_ann_24'].get('intersects')} "
+            f"fids={rec['manual_ann_24'].get('fids')}"
+        )
+        print(
+            f"manual25: intersects={rec['manual_ann_25'].get('intersects')} "
+            f"fids={rec['manual_ann_25'].get('fids')}"
+        )
         print("Paste extent into QGIS: View → Set Extent… (or paste into Python console)\n")
+
+    def toggle_mode():
+        if missed.empty:
+            print("No missed candidates queue (empty).")
+            return
+        state["mode"] = "missed" if state["mode"] == "matches" else "matches"
+        state["idx"] = 0
+        mode_name = "missed candidates" if state["mode"] == "missed" else "matcher matches"
+        print(f"Switched to {mode_name} queue ({_queue_len()} items).")
+        redraw()
 
     def on_key(event):
         if event.key in ("n", "right"):
-            state["idx"] = (state["idx"] + 1) % len(matches)
-            redraw()
+            if _queue_len():
+                state["idx"] = (state["idx"] + 1) % _queue_len()
+                redraw()
         elif event.key in ("p", "left"):
-            state["idx"] = (state["idx"] - 1) % len(matches)
-            redraw()
+            if _queue_len():
+                state["idx"] = (state["idx"] - 1) % _queue_len()
+                redraw()
         elif event.key in ("y", "Y"):
             set_label(LABEL_CONFIRMED)
         elif event.key in ("x", "X"):
             set_label(LABEL_NOT)
         elif event.key in ("?", "u", "U"):
             set_label(LABEL_UNSURE)
-        elif event.key in ("backspace", "delete"):
+        elif event.key == "backspace":
             set_label(None)
+        elif event.key == "b":
+            _update_flags(boulder_flag=BOULDER_YES)
+        elif event.key == "z":
+            _update_flags(boulder_flag=BOULDER_NO)
+        elif event.key == "d":
+            _update_flags(deposit_flag=True)
+        elif event.key == "i":
+            _update_flags(isolated=True)
+        elif event.key == "B":
+            _update_flags(boulder_flag=None)
+        elif event.key == "D":
+            _update_flags(deposit_flag=None)
+        elif event.key in ("m", "M"):
+            toggle_mode()
         elif event.key in ("o", "O"):
             state["overview_zoomed"] = not state["overview_zoomed"]
             redraw()
@@ -745,16 +989,60 @@ def run_eval_gui(
             plt.close(fig)
 
     fig.canvas.mpl_connect("key_press_event", on_key)
-    # Start at first unlabeled if any
     _goto_next_unlabeled(prefer_advance=False)
+    missed_note = f", {len(missed)} missed candidates (m toggles)" if not missed.empty else ""
     print(
-        f"Evaluating {len(matches)} matches → {labels_path}\n"
-        "y=confirm match  x=not a match  ?=unsure  j=next unlabeled  "
-        "c=print coords  s=save  q=save+quit"
+        f"Evaluating {len(matches)} matcher matches{missed_note} → {labels_path}\n"
+        "y=confirm  x=not-match  ?=unsure  b/z/d/i=flags  m=queue  j=next unlabeled  "
+        "c=print  s=save  q=save+quit"
     )
     plt.show()
     if state["dirty"]:
         do_save()
+
+
+def _load_missed_candidates(
+    results: dict[str, gpd.GeoDataFrame],
+    results_dir: Path,
+    candidate_radius: float,
+) -> gpd.GeoDataFrame:
+    missed = results.get("missed_candidates")
+    if missed is not None and not missed.empty:
+        print(f"Loaded {len(missed)} missed candidates from {results_dir / 'missed_candidates.geojson'}")
+        return missed
+
+    disappeared = results.get("disappeared")
+    appeared = results.get("appeared")
+    if (
+        disappeared is None
+        or appeared is None
+        or disappeared.empty
+        or appeared.empty
+    ):
+        return gpd.GeoDataFrame(geometry=[], crs="EPSG:25829")
+
+    from .candidates import build_missed_candidates
+
+    exclude: set[tuple[int, int]] = set()
+    matches = results.get("matches")
+    if matches is not None and not matches.empty:
+        exclude = {
+            (int(r["before_id"]), int(r["after_id"]))
+            for _, r in matches.iterrows()
+        }
+
+    missed = build_missed_candidates(
+        disappeared,
+        appeared,
+        candidate_radius=candidate_radius,
+        exclude_pairs=exclude,
+    )
+    if not missed.empty:
+        print(
+            f"Built {len(missed)} missed candidates on the fly "
+            f"(candidate_radius={candidate_radius}m)"
+        )
+    return missed
 
 
 def main():
@@ -781,6 +1069,12 @@ def main():
     parser.add_argument("--no-ann", action="store_true", help="Skip manual annotation intersect checks")
     parser.add_argument("--pad-m", type=float, default=8.0)
     parser.add_argument("--min-iou", type=float, default=0.05, help="Min IoU to list an ann fid")
+    parser.add_argument(
+        "--candidate-radius",
+        type=float,
+        default=25.0,
+        help="Radius (m) for on-the-fly missed-candidate pairing when geojson is missing",
+    )
     args = parser.parse_args()
 
     outdir = args.outdir
@@ -795,6 +1089,7 @@ def main():
 
     results = load_results(results_dir)
     before, after = load_inputs(before_path, after_path)
+    missed = _load_missed_candidates(results, results_dir, args.candidate_radius)
 
     pair_tiles = None
     before_raster = after_raster = None
@@ -827,6 +1122,7 @@ def main():
         "manual_ann_25": str(args.ann_25.resolve()) if args.ann_25 else None,
         "crs": "EPSG:25829",
         "min_iou_for_fid": args.min_iou,
+        "candidate_radius": args.candidate_radius,
     }
 
     run_eval_gui(
@@ -839,6 +1135,7 @@ def main():
         before_raster=before_raster,
         after_raster=after_raster,
         pair_tiles=pair_tiles,
+        missed_candidates=missed,
         pad_m=args.pad_m,
         meta=meta,
         min_iou=args.min_iou,

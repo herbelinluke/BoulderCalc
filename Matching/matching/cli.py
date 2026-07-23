@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
+from .candidates import run_matcher_with_candidates, write_missed_candidates
 from .dedupe import dedupe_polygons
 from .matcher import BoulderMatcher
 from .qc import run_dod_qc, write_dod_qc
@@ -18,8 +19,25 @@ def main():
     parser.add_argument("--before-dsm", default=None, help="Before survey DSM")
     parser.add_argument("--after-dsm", default=None, help="After survey DSM")
     parser.add_argument("--outdir", required=True)
-    parser.add_argument("--search-radius", type=float, default=5.0)
-    parser.add_argument("--min-score", type=float, default=0.55)
+    parser.add_argument(
+        "--search-radius",
+        type=float,
+        default=BoulderMatcher.DEFAULT_SEARCH_RADIUS,
+        help=f"Centroid search radius in metres (default {BoulderMatcher.DEFAULT_SEARCH_RADIUS})",
+    )
+    parser.add_argument("--min-score", type=float, default=BoulderMatcher.DEFAULT_MIN_SCORE)
+    parser.add_argument(
+        "--candidate-radius",
+        type=float,
+        default=None,
+        help="Radius for missed appeared↔disappeared candidates (default 1.5× search-radius)",
+    )
+    parser.add_argument(
+        "--candidate-min-score",
+        type=float,
+        default=0.35,
+        help="Softer score floor for missed-match review candidates",
+    )
     parser.add_argument("--compute-volume", action="store_true")
     parser.add_argument(
         "--dedupe",
@@ -84,23 +102,25 @@ def main():
         before.compute_volume()
         after.compute_volume()
 
-    matcher = BoulderMatcher(
-        before=before,
-        after=after,
+    results = run_matcher_with_candidates(
+        before,
+        after,
         search_radius=args.search_radius,
         min_score=args.min_score,
+        candidate_radius=args.candidate_radius,
+        candidate_min_score=args.candidate_min_score,
     )
-
-    results = matcher.match()
 
     results["matches"].to_file(outdir / "matched_boulders.geojson", driver="GeoJSON")
     results["appeared"].to_file(outdir / "appeared_boulders.geojson", driver="GeoJSON")
     results["disappeared"].to_file(outdir / "disappeared_boulders.geojson", driver="GeoJSON")
     results["vectors"].to_file(outdir / "movement_vectors.geojson", driver="GeoJSON")
+    write_missed_candidates(results["missed_candidates"], outdir / "missed_candidates.geojson")
 
     print(f"Matches: {len(results['matches'])}")
     print(f"Appeared: {len(results['appeared'])}")
     print(f"Disappeared: {len(results['disappeared'])}")
+    print(f"Missed candidates (review): {len(results['missed_candidates'])}")
     print(f"Movement vectors: {len(results['vectors'])}")
 
     if args.dod_qc and args.before_dsm and args.after_dsm:

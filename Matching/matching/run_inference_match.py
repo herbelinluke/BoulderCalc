@@ -30,6 +30,7 @@ from shapely.geometry import Polygon
 from shapely.ops import unary_union
 
 # Matching package
+from .candidates import run_matcher_with_candidates, write_missed_candidates
 from .dedupe import dedupe_polygons
 from .matcher import BoulderMatcher
 from .qc import run_dod_qc, write_dod_qc
@@ -539,17 +540,22 @@ def run_pipeline(args: argparse.Namespace) -> dict:
         before_survey.compute_volume()
         after_survey.compute_volume()
 
-    matcher = BoulderMatcher(
-        before=before_survey,
-        after=after_survey,
+    results = run_matcher_with_candidates(
+        before_survey,
+        after_survey,
         search_radius=args.search_radius,
         min_score=args.min_score,
+        candidate_radius=getattr(args, "candidate_radius", None),
+        candidate_min_score=getattr(args, "candidate_min_score", 0.35),
     )
-    results = matcher.match()
     write_geojson(results["matches"], results_dir / "matched_boulders.geojson")
     write_geojson(results["appeared"], results_dir / "appeared_boulders.geojson")
     write_geojson(results["disappeared"], results_dir / "disappeared_boulders.geojson")
     write_geojson(results["vectors"], results_dir / "movement_vectors.geojson")
+    write_missed_candidates(
+        results["missed_candidates"], results_dir / "missed_candidates.geojson"
+    )
+    print(f"Missed-match candidates for review: {len(results['missed_candidates'])}")
 
     dod_summary = None
     if getattr(args, "dod_qc", True) and dsm24.exists() and dsm25.exists():
@@ -585,6 +591,8 @@ def run_pipeline(args: argparse.Namespace) -> dict:
         "matches": len(results["matches"]),
         "appeared": len(results["appeared"]),
         "disappeared": len(results["disappeared"]),
+        "missed_candidates": len(results["missed_candidates"]),
+        "candidate_radius": results.get("candidate_radius"),
         "dod_qc": dod_summary,
     }
     (outdir / "match_summary.json").write_text(json.dumps(summary, indent=2))
@@ -631,8 +639,19 @@ def main():
     parser.add_argument("--dsm-24", type=Path, default=None)
     parser.add_argument("--dsm-25", type=Path, default=None)
     parser.add_argument("--score-thresh", type=float, default=0.4)
-    parser.add_argument("--search-radius", type=float, default=5.0)
-    parser.add_argument("--min-score", type=float, default=0.55)
+    parser.add_argument(
+        "--search-radius",
+        type=float,
+        default=BoulderMatcher.DEFAULT_SEARCH_RADIUS,
+    )
+    parser.add_argument("--min-score", type=float, default=BoulderMatcher.DEFAULT_MIN_SCORE)
+    parser.add_argument(
+        "--candidate-radius",
+        type=float,
+        default=None,
+        help="Missed appeared↔disappeared review radius (default 1.5× search-radius)",
+    )
+    parser.add_argument("--candidate-min-score", type=float, default=0.35)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--image-size", type=int, default=2000)
     parser.add_argument("--compute-volume", action="store_true", default=True)

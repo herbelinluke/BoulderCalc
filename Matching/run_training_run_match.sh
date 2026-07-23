@@ -50,7 +50,7 @@ export MPLBACKEND="${MPLBACKEND:-Agg}"
   --outdir "$OUT" \
   --project-root "$ROOT" \
   --score-thresh 0.4 \
-  --search-radius 5.0 \
+  --search-radius 15.0 \
   --min-score 0.55 \
   --device cpu \
   "${EXTRA[@]}"

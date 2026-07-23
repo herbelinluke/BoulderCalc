@@ -13,12 +13,16 @@ from .attributes import angle_difference_deg, compute_basic_attributes, safe_log
 
 
 class BoulderMatcher:
+    # Default radius raised so coastal boulder moves beyond ~5 m can still match.
+    DEFAULT_SEARCH_RADIUS = 15.0
+    DEFAULT_MIN_SCORE = 0.55
+
     def __init__(
         self,
         before,
         after,
-        search_radius: float = 5.0,
-        min_score: float = 0.55,
+        search_radius: float = DEFAULT_SEARCH_RADIUS,
+        min_score: float = DEFAULT_MIN_SCORE,
     ):
         self.before = before
         self.after = after

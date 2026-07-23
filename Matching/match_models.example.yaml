@@ -1,0 +1,25 @@
+# Example multi-model matching config for `python -m matching.run_match_models`.
+# Paths are relative to this file unless absolute.
+#
+# Full inference+match per model:
+#   python -m matching.run_match_models --config match_models.example.yaml
+#
+# Rematch only (reuse polygons, change radius / score):
+#   python -m matching.run_match_models --config match_models.example.yaml --rematch-only
+
+project_root: ../..
+search_radius: 15.0
+min_score: 0.55
+candidate_radius: 25.0
+score_thresh: 0.4
+device: cpu
+
+models:
+  - name: rgb_dsm_4000
+    model: ../../segmentation/training_run_rgb_dsm_4000/model_final.pth
+    outdir: ../../segmentation/match_runs/rgb_dsm_4000
+
+  # Add more models as weights become available:
+  # - name: geo_baseline
+  #   model: ../../segmentation/training_run_geo_baseline/model_final.pth
+  #   outdir: ../../segmentation/match_runs/geo_baseline

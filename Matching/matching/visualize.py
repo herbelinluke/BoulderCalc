@@ -54,6 +54,7 @@ def load_results(results_dir: Path) -> dict[str, gpd.GeoDataFrame]:
         "appeared": _read_layer(results_dir / "appeared_boulders.geojson"),
         "disappeared": _read_layer(results_dir / "disappeared_boulders.geojson"),
         "vectors": _read_layer(results_dir / "movement_vectors.geojson"),
+        "missed_candidates": _read_layer(results_dir / "missed_candidates.geojson"),
     }
 
 

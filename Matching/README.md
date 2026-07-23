@@ -141,28 +141,50 @@ run the 4-band model on both years, match, and write side-by-side shots.
 
 ## Matcher evaluation labeling
 
-Build a human-labeled eval set by flipping through inferred matches and
-marking each as confirmed / not-a-match / unsure:
+Flip through **matcher matches** and **missed candidates** (appeared↔disappeared
+pairs the Hungarian step did not accept) to build a labeled eval set:
 
 ``` bash
 ./run_match_eval.sh
-# or:
+# or against a GT / rematch dataset:
 python -m matching.evaluate_matches \
-  --outdir ../../segmentation/training_run_rgb_dsm_4000/matching
+  --outdir ../../segmentation/match_datasets/july14_smoke
 ```
 
-Keys: `y` confirm, `x` not a match, `?` unsure, `j` next unlabeled,
-`c` print QGIS extent/centroids, `s` save, `q` save+quit, `n`/`p` navigate.
+Keys: `y` confirm, `x` not a match, `?` unsure,
+`b` boulder / `z` not a boulder, `d` deposit / `i` isolated,
+`m` toggle matcher matches ↔ missed candidates,
+`j` next unlabeled, `c` print QGIS extent/volumes, `s` save, `q` quit.
 
-Writes:
+Default matcher **search radius is 15 m** (was 5 m). Missed-candidate review
+uses a wider radius (~25 m) and a softer score floor. Volumes are shown for
+review only — nothing is filtered on volume.
 
--   `<outdir>/eval/match_labels.json` — full records (centroids, bbox, WKT,
-    score, distance, `intersects` + GPKG `fid`s vs `july14_24` / `july14_25`)
--   `<outdir>/eval/match_labels.geojson` — point layer for QGIS (after centroid)
+Writes `<outdir>/eval/match_labels.json` (+ `.geojson` for QGIS) with
+centroids, bbox, WKT, volumes, `boulder_flag`, `deposit_flag`, `source_queue`,
+and manual-annotation intersect / GPKG `fid`s.
 
-GPKG `fid`s are stable when you *append* annotations; they can change if
-features are deleted/recreated — `intersects` remains the durable flag.
-Purple outlines on the detail panels are nearby manual annotations.
+### Build a larger labeling dataset
+
+``` bash
+# Manual july14 GPKGs (optional --bbox MINX MINY MAXX MAXY)
+./run_build_gt_dataset.sh
+# or rematch existing inference polygons at the new radius:
+python -m matching.build_gt_dataset \
+  --before-polygons ../../segmentation/training_run_rgb_dsm_4000/matching/predictions/before_inferred_boulders.geojson \
+  --after-polygons ../../segmentation/training_run_rgb_dsm_4000/matching/predictions/after_inferred_boulders.geojson \
+  --outdir ../../segmentation/match_datasets/rematch_r15 \
+  --search-radius 15 --candidate-radius 25
+```
+
+### Multi-model matching runs
+
+``` bash
+python -m matching.run_match_models --config match_models.example.yaml
+python -m matching.run_match_models --config match_models.example.yaml --rematch-only
+```
+
+Each model gets its own outdir; label with `evaluate_matches --outdir …`.
 
 ## Matching Method
 
