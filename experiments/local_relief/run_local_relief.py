@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
-"""Build + train RGB+DSM with --dsm-mode local_relief (separate tile dirs).
+"""Train elevation DSM vs local-relief DSM (baseline tiles, Windows-safe).
+
+Builds shared RGB COCO (iscrowd deposits + iscrowd below --min-area-m2), then
+two 4-band pipelines:
+
+  elevation     tiling_rgb_dsm_{24,25}           → training_run_rgb_dsm
+  local_relief  tiling_rgb_dsm_local_relief_{*}  → training_run_local_relief
+
+Defaults match the dual Windows recipe: --no-rich-aug, --min-area-m2 1.5,
+jitter 0.15 / 8× offline aug, --batch-size 1, --num-workers 2, --max-iter 3000,
+early stop after 500 iters without val ``segm/AP`` improvement.
 
 Run from the project root (parent of BoulderCalculator/ and segmentation/):
 
   python BoulderCalculator/experiments/local_relief/run_local_relief.py --mode smoke --device cuda
-  python BoulderCalculator/experiments/local_relief/run_local_relief.py --mode full --device cuda --batch-size 1 --min-area-m2 1.5
+  python BoulderCalculator/experiments/local_relief/run_local_relief.py --mode full --device cuda
+  python BoulderCalculator/experiments/local_relief/run_local_relief.py --mode full --models elevation
 """
 
 from __future__ import annotations
@@ -19,13 +30,29 @@ EXP_DIR = Path(__file__).resolve().parent
 REPO_ROOT = EXP_DIR.parents[1]  # BoulderCalculator/
 SCRIPTS = REPO_ROOT / "scripts"
 
-TILE_24 = "tiling_rgb_dsm_local_relief_24"
-TILE_25 = "tiling_rgb_dsm_local_relief_25"
 COCO_RGB = "coco_dataset_both"
-COCO_4B = "coco_dataset_local_relief"
-COCO_AUG = "coco_dataset_local_relief_aug"
-OUT_FULL = "training_run_local_relief"
-OUT_SMOKE = "training_run_local_relief_smoke"
+
+# (dsm_mode, tile_24, tile_25, coco_4b, coco_aug, out_full, out_smoke)
+MODEL_SPECS: dict[str, tuple[str, str, str, str, str, str, str]] = {
+    "elevation": (
+        "elevation",
+        "tiling_rgb_dsm_24",
+        "tiling_rgb_dsm_25",
+        "coco_dataset_rgb_dsm",
+        "coco_dataset_rgb_dsm_aug",
+        "training_run_rgb_dsm",
+        "training_run_rgb_dsm_smoke",
+    ),
+    "local_relief": (
+        "local_relief",
+        "tiling_rgb_dsm_local_relief_24",
+        "tiling_rgb_dsm_local_relief_25",
+        "coco_dataset_local_relief",
+        "coco_dataset_local_relief_aug",
+        "training_run_local_relief",
+        "training_run_local_relief_smoke",
+    ),
+}
 
 
 def project_root_from_cwd() -> Path:
@@ -46,102 +73,64 @@ def run(cmd: list[str], *, label: str) -> None:
     print(f"[OK] {label} ({elapsed:.1f}s)", flush=True)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--batch-size", type=int, default=None)
-    parser.add_argument("--image-size", type=int, default=None)
-    parser.add_argument("--max-iter", type=int, default=None)
-    parser.add_argument("--min-area-m2", type=float, default=1.5)
-    parser.add_argument("--relief-radius-m", type=float, default=10.0)
-    parser.add_argument("--checkpoint-period", type=int, default=None)
-    parser.add_argument("--eval-period", type=int, default=None)
-    parser.add_argument("--no-rich-aug", action="store_true")
-    parser.add_argument("--no-eval", action="store_true")
-    parser.add_argument("--skip-train", action="store_true")
-    parser.add_argument(
-        "--skip-build-tiles",
-        action="store_true",
-        help="Reuse existing tiling_rgb_dsm_local_relief_{24,25}",
-    )
-    parser.add_argument(
-        "--skip-coco",
-        action="store_true",
-        help="Skip gpkg_to_coco if coco_dataset_both already exists",
-    )
-    parser.add_argument("--python", default=sys.executable)
-    args = parser.parse_args()
-
-    root = project_root_from_cwd()
-    py = args.python
-    seg = root / "segmentation"
-
-    if args.mode == "smoke":
-        max_iter = args.max_iter if args.max_iter is not None else 3
-        batch_size = args.batch_size if args.batch_size is not None else 1
-        image_size = args.image_size if args.image_size is not None else 800
-        checkpoint_period = args.checkpoint_period if args.checkpoint_period is not None else 2
-        eval_period = args.eval_period if args.eval_period is not None else 2
-        out_name = OUT_SMOKE
-    else:
-        max_iter = args.max_iter if args.max_iter is not None else 5000
-        batch_size = args.batch_size if args.batch_size is not None else 1
-        image_size = args.image_size if args.image_size is not None else 2000
-        checkpoint_period = (
-            args.checkpoint_period if args.checkpoint_period is not None else 2000
+def parse_models(value: str) -> list[str]:
+    if value.strip().lower() == "both":
+        return ["elevation", "local_relief"]
+    names = [p.strip() for p in value.split(",") if p.strip()]
+    unknown = [n for n in names if n not in MODEL_SPECS]
+    if unknown:
+        raise SystemExit(
+            f"Unknown --models {unknown!r}; choose from "
+            f"{sorted(MODEL_SPECS)} or 'both'"
         )
-        eval_period = args.eval_period if args.eval_period is not None else 500
-        out_name = OUT_FULL
+    if not names:
+        raise SystemExit("--models must list at least one model or 'both'")
+    return names
 
-    print(f"Project root: {root}")
-    print(
-        f"mode={args.mode} dsm_mode=local_relief relief_radius_m={args.relief_radius_m} "
-        f"max_iter={max_iter} batch_size={batch_size} image_size={image_size}"
-    )
 
-    coco_rgb = seg / COCO_RGB
-    if not args.skip_coco or not (coco_rgb / "train_annotations.json").is_file():
-        run(
-            [
-                py,
-                str(SCRIPTS / "gpkg_to_coco.py"),
-                "--segmentation-dir",
-                str(seg),
-                "--years",
-                "24,25",
-                "--output-dir",
-                str(coco_rgb),
-                "--min-area-m2",
-                str(args.min_area_m2),
-            ],
-            label="gpkg_to_coco",
-        )
-    else:
-        print(f"[skip] existing {coco_rgb}")
+def build_one_model(
+    *,
+    py: str,
+    seg: Path,
+    coco_rgb: Path,
+    model: str,
+    args: argparse.Namespace,
+    max_iter: int,
+    batch_size: int,
+    image_size: int,
+    checkpoint_period: int,
+    eval_period: int,
+    out_name: str,
+) -> None:
+    (
+        dsm_mode,
+        tile_24,
+        tile_25,
+        coco_4b_name,
+        coco_aug_name,
+        _out_full,
+        _out_smoke,
+    ) = MODEL_SPECS[model]
 
     if not args.skip_build_tiles:
         for year in (24, 25):
-            run(
-                [
-                    py,
-                    str(SCRIPTS / "build_rgb_dsm_tiles.py"),
-                    "--year",
-                    str(year),
-                    "--dsm-mode",
-                    "local_relief",
-                    "--relief-radius-m",
-                    str(args.relief_radius_m),
-                    "--from-coco",
-                    str(coco_rgb),
-                ],
-                label=f"build_rgb_dsm_tiles year={year} local_relief",
-            )
+            cmd = [
+                py,
+                str(SCRIPTS / "build_rgb_dsm_tiles.py"),
+                "--year",
+                str(year),
+                "--dsm-mode",
+                dsm_mode,
+                "--from-coco",
+                str(coco_rgb),
+            ]
+            if dsm_mode == "local_relief":
+                cmd.extend(["--relief-radius-m", str(args.relief_radius_m)])
+            run(cmd, label=f"build_rgb_dsm_tiles year={year} {dsm_mode}")
     else:
-        print(f"[skip] tile build ({TILE_24}, {TILE_25})")
+        print(f"[skip] tile build ({tile_24}, {tile_25})")
 
-    coco_4b = seg / COCO_4B
+    coco_4b = seg / coco_4b_name
     run(
         [
             py,
@@ -149,15 +138,15 @@ def main() -> None:
             "--source-coco",
             str(coco_rgb),
             "--tile-dirs",
-            str(seg / TILE_24),
-            str(seg / TILE_25),
+            str(seg / tile_24),
+            str(seg / tile_25),
             "--output-dir",
             str(coco_4b),
         ],
-        label="build_coco_rgb_dsm (local_relief)",
+        label=f"build_coco_rgb_dsm ({model})",
     )
 
-    coco_aug = seg / COCO_AUG
+    coco_aug = seg / coco_aug_name
     run(
         [
             py,
@@ -167,13 +156,13 @@ def main() -> None:
             "--output-dir",
             str(coco_aug),
             "--jitter",
-            "0.15",
+            str(args.jitter),
         ],
-        label="offline aug (train)",
+        label=f"offline aug 8x+jitter ({model})",
     )
 
     if args.skip_train:
-        print("[skip] train")
+        print(f"[skip] train ({model})")
         return
 
     train_cmd = [
@@ -203,8 +192,159 @@ def main() -> None:
         train_cmd.append("--no-rich-aug")
     if args.no_eval:
         train_cmd.append("--no-eval")
-    run(train_cmd, label=f"train ({args.mode})")
-    print(f"\nDone. Outputs: {seg / out_name}", flush=True)
+    elif args.early_stop_patience_iters > 0:
+        train_cmd.extend(
+            [
+                "--early-stop-patience-iters",
+                str(args.early_stop_patience_iters),
+                "--early-stop-metric",
+                args.early_stop_metric,
+            ]
+        )
+    run(train_cmd, label=f"train {model} ({args.mode})")
+    print(f"Outputs: {seg / out_name}", flush=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
+    parser.add_argument(
+        "--models",
+        default="both",
+        help="Comma-separated: elevation, local_relief, or both (default).",
+    )
+    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--image-size", type=int, default=None)
+    parser.add_argument("--max-iter", type=int, default=None)
+    parser.add_argument(
+        "--min-area-m2",
+        type=float,
+        default=1.5,
+        help="Small-boulder cutoff (m²); below → iscrowd (default 1.5).",
+    )
+    parser.add_argument("--relief-radius-m", type=float, default=10.0)
+    parser.add_argument("--jitter", type=float, default=0.15)
+    parser.add_argument("--checkpoint-period", type=int, default=None)
+    parser.add_argument("--eval-period", type=int, default=None)
+    parser.add_argument(
+        "--early-stop-patience-iters",
+        type=int,
+        default=None,
+        help=(
+            "Stop when segm/AP has not improved for N iters since best eval. "
+            "Default: 0 (smoke) or 500 (full). Pass 0 to disable."
+        ),
+    )
+    parser.add_argument("--early-stop-metric", default="segm/AP")
+    parser.add_argument(
+        "--rich-aug",
+        action="store_true",
+        help="Enable online coastal rich augs (default for this experiment: off).",
+    )
+    parser.add_argument("--no-rich-aug", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-eval", action="store_true")
+    parser.add_argument("--skip-train", action="store_true")
+    parser.add_argument(
+        "--skip-build-tiles",
+        action="store_true",
+        help="Reuse existing 4-band tile dirs for selected models",
+    )
+    parser.add_argument(
+        "--skip-coco",
+        action="store_true",
+        help="Skip gpkg_to_coco if coco_dataset_both already exists",
+    )
+    parser.add_argument("--python", default=sys.executable)
+    args = parser.parse_args()
+
+    # This experiment defaults to offline-only (no rich online augs).
+    args.no_rich_aug = not args.rich_aug
+
+    models = parse_models(args.models)
+    root = project_root_from_cwd()
+    py = args.python
+    seg = root / "segmentation"
+
+    if args.mode == "smoke":
+        max_iter = args.max_iter if args.max_iter is not None else 3
+        batch_size = args.batch_size if args.batch_size is not None else 1
+        image_size = args.image_size if args.image_size is not None else 800
+        checkpoint_period = args.checkpoint_period if args.checkpoint_period is not None else 2
+        eval_period = args.eval_period if args.eval_period is not None else 2
+        early_stop = (
+            args.early_stop_patience_iters
+            if args.early_stop_patience_iters is not None
+            else 0
+        )
+        out_idx = 6  # out_smoke
+    else:
+        max_iter = args.max_iter if args.max_iter is not None else 3000
+        batch_size = args.batch_size if args.batch_size is not None else 1
+        image_size = args.image_size if args.image_size is not None else 2000
+        checkpoint_period = (
+            args.checkpoint_period if args.checkpoint_period is not None else 1000
+        )
+        eval_period = args.eval_period if args.eval_period is not None else 500
+        early_stop = (
+            args.early_stop_patience_iters
+            if args.early_stop_patience_iters is not None
+            else 500
+        )
+        out_idx = 5  # out_full
+
+    args.early_stop_patience_iters = early_stop
+
+    print(f"Project root: {root}")
+    print(
+        f"mode={args.mode} models={models} min_area_m2={args.min_area_m2} "
+        f"jitter={args.jitter} no_rich_aug={args.no_rich_aug} "
+        f"max_iter={max_iter} batch_size={batch_size} num_workers={args.num_workers} "
+        f"early_stop_patience_iters={early_stop}"
+    )
+
+    coco_rgb = seg / COCO_RGB
+    if not args.skip_coco or not (coco_rgb / "train_annotations.json").is_file():
+        # Defaults: --boulder-only (deposits iscrowd) + small boulders iscrowd.
+        run(
+            [
+                py,
+                str(SCRIPTS / "gpkg_to_coco.py"),
+                "--segmentation-dir",
+                str(seg),
+                "--years",
+                "24,25",
+                "--output-dir",
+                str(coco_rgb),
+                "--min-area-m2",
+                str(args.min_area_m2),
+            ],
+            label="gpkg_to_coco (baseline tiles, iscrowd deposits+small)",
+        )
+    else:
+        print(f"[skip] existing {coco_rgb}")
+
+    for model in models:
+        out_name = MODEL_SPECS[model][out_idx]
+        build_one_model(
+            py=py,
+            seg=seg,
+            coco_rgb=coco_rgb,
+            model=model,
+            args=args,
+            max_iter=max_iter,
+            batch_size=batch_size,
+            image_size=image_size,
+            checkpoint_period=checkpoint_period,
+            eval_period=eval_period,
+            out_name=out_name,
+        )
+
+    outs = [str(seg / MODEL_SPECS[m][out_idx]) for m in models]
+    print("\nDone. Training outputs:", flush=True)
+    for o in outs:
+        print(f"  {o}", flush=True)
 
 
 if __name__ == "__main__":

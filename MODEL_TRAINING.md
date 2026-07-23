@@ -44,6 +44,7 @@ back here for the workflow:
 - **Windows (normal/admin):** [`setup/README_WINDOWS.md`](setup/README_WINDOWS.md)
 - **Windows (guest / no admin / long‑path issues):** [`setup/README_WINDOWS_GUEST.md`](setup/README_WINDOWS_GUEST.md)
 - **Geo-split weekend experiment (RGB+DSM, five region setups):** [`experiments/geo_splits/README.md`](experiments/geo_splits/README.md)
+- **Elevation vs local-relief DSM (baseline dual train):** [`experiments/local_relief/README.md`](experiments/local_relief/README.md)
 
 All three install the same stack: a Python 3.10/3.11 environment,
 `setup/requirements-training.txt`, GPU PyTorch, and Detectron2 (wheel on Linux,
@@ -207,12 +208,16 @@ All of these are flags on `train_boulder_local.py`:
 | `--no-rich-aug` | off | Disable the coastal aug stack (rotation/flips/scale/photometric); use resize‑only |
 | `--checkpoint-period` | 2000 if `max-iter>=1000`, else short-run formula | Write `model_XXXX.pth` every N iters |
 | `--eval-period` | 500 if `max-iter>=1000`, else short-run formula | Validation COCO eval every N iters (AP in `metrics.json`) |
+| `--early-stop-patience-iters` | `0` (off) | Stop when `--early-stop-metric` has not improved for N iters since the best eval; also writes `model_best.pth`. Typical: `500`–`1000` with `--eval-period 500`. Requires periodic eval. |
+| `--early-stop-metric` | `segm/AP` | Event-storage key watched by early stopping |
 
 Notes:
 - `--resume` and `--weights` are different: resume continues a run from its
   checkpoints; `--weights` sets the *initial* backbone weights.
 - `--no-eval` means no `metrics_valid.json` is written — evaluate later with the
   steps in [§11](#11-step-5--evaluation--recall).
+- Early stop cuts a long `--max-iter` once validation AP plateaus (saturation).
+  Prefer `model_best.pth` over `model_final.pth` when it fired.
 
 ## 10. Step 4 — Inference
 
