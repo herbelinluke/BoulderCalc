@@ -22,7 +22,7 @@ from pathlib import Path
 import rasterio
 
 
-def resolve_four_band(tile_dirs: list[Path], file_name: str) -> Path:
+def resolve_tile(tile_dirs: list[Path], file_name: str) -> Path:
     """Find file_name in tile dirs; also try stripping a leading '24_' / '25_' prefix."""
     candidates = [file_name]
     for prefix in ("24_", "25_"):
@@ -34,14 +34,14 @@ def resolve_four_band(tile_dirs: list[Path], file_name: str) -> Path:
             if path.exists():
                 return path
     raise FileNotFoundError(
-        f"4-band tile not found for {file_name!r} under {[str(d) for d in tile_dirs]}"
+        f"Tile not found for {file_name!r} under {[str(d) for d in tile_dirs]}"
     )
 
 
-def assert_four_bands(path: Path) -> None:
+def assert_min_bands(path: Path, min_bands: int) -> None:
     with rasterio.open(path) as ds:
-        if ds.count < 4:
-            raise ValueError(f"{path} has {ds.count} bands; expected 4")
+        if ds.count < min_bands:
+            raise ValueError(f"{path} has {ds.count} bands; expected >={min_bands}")
 
 
 def copy_split(
@@ -50,6 +50,7 @@ def copy_split(
     split: str,
     ann_name: str,
     tile_dirs: list[Path],
+    min_bands: int,
 ) -> dict:
     ann_src = source_coco / ann_name
     data = json.loads(ann_src.read_text())
@@ -58,8 +59,8 @@ def copy_split(
 
     copied = []
     for image in data["images"]:
-        src = resolve_four_band(tile_dirs, image["file_name"])
-        assert_four_bands(src)
+        src = resolve_tile(tile_dirs, image["file_name"])
+        assert_min_bands(src, min_bands)
         dst = split_out / image["file_name"]
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -82,13 +83,19 @@ def main() -> None:
         type=Path,
         nargs="+",
         required=True,
-        help="One or more tiling_rgb_dsm_* directories containing 4-band GeoTIFFs.",
+        help="One or more tiling_rgb_dsm_* (or tiling_rgb_dsm_ddsm_*) directories.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("segmentation/coco_dataset_rgb_dsm"),
-        help="Output 4-band COCO dataset dir. Default: segmentation/coco_dataset_rgb_dsm",
+        help="Output multi-band COCO dataset dir.",
+    )
+    parser.add_argument(
+        "--min-bands",
+        type=int,
+        default=4,
+        help="Require at least this many bands per tile (4=RGB+DSM, 5=RGB+DSM+dDSM).",
     )
     args = parser.parse_args()
 
@@ -99,9 +106,23 @@ def main() -> None:
         ("valid", "validation_annotations.json"),
         ("test", "testing_annotations.json"),
     ]:
-        summary.append(copy_split(args.source_coco, args.output_dir, split, ann, args.tile_dirs))
+        summary.append(
+            copy_split(
+                args.source_coco,
+                args.output_dir,
+                split,
+                ann,
+                args.tile_dirs,
+                args.min_bands,
+            )
+        )
 
-    out = {"source": str(args.source_coco), "output": str(args.output_dir), "splits": summary}
+    out = {
+        "source": str(args.source_coco),
+        "output": str(args.output_dir),
+        "min_bands": args.min_bands,
+        "splits": summary,
+    }
     (args.output_dir / "build_coco_rgb_dsm_summary.json").write_text(json.dumps(out, indent=2))
     print(json.dumps(out, indent=2))
 
@@ -113,11 +134,16 @@ def main() -> None:
         flags={
             "source_coco": str(args.source_coco),
             "tile_dirs": [str(d) for d in args.tile_dirs],
-            "four_band": True,
+            "min_bands": args.min_bands,
+            "four_band": args.min_bands == 4,
+            "five_band": args.min_bands >= 5,
         },
         splits_summary=summary,
         parents=[args.source_coco, *args.tile_dirs],
-        notes="COCO annotations from source RGB dataset; images replaced with 4-band RGB+DSM tiles.",
+        notes=(
+            "COCO annotations from source RGB dataset; images replaced with "
+            f"{args.min_bands}-band tiles."
+        ),
         extra={"legacy_summary_file": "build_coco_rgb_dsm_summary.json"},
     )
 

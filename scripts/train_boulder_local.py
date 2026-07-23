@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Minimal local Detectron2 training smoke test for the site_1 tile dataset.
 
-Supports standard 3-band RGB tiles (default) or 4-band RGB+DSM GeoTIFFs via
-``--four-band`` (custom rasterio mapper + 4-channel ResNet stem).
-
-COCO ``iscrowd=1`` polygons (deposits / sub-threshold boulders from
-``gpkg_to_coco.py``) are treated as ignore regions: not positives, and not
-used as background negatives in RPN / ROI loss (see ``crowd_ignore.py``).
+Supports standard 3-band RGB tiles (default), 4-band RGB+DSM via ``--four-band``,
+or 5-band RGB+DSM+dDSM via ``--five-band`` (fine-tune from a 4-band checkpoint
+with ``--weights``).
 """
 
 from __future__ import annotations
@@ -39,9 +36,13 @@ from crowd_ignore import (  # noqa: E402
     transform_annotations_with_ignore,
 )
 from multiband_io import (  # noqa: E402
+    FIVE_BAND_PIXEL_MEAN,
+    FIVE_BAND_PIXEL_STD,
     FOUR_BAND_PIXEL_MEAN,
     FOUR_BAND_PIXEL_STD,
     load_bgrd_uint8,
+    load_bgrdd_uint8,
+    load_four_band_weights_into_five_band,
     patch_four_band_stem_from_checkpoint,
 )
 from run_provenance import update_training_metrics, write_training_provenance  # noqa: E402
@@ -90,8 +91,49 @@ class FourBandDatasetMapper(CrowdAwareDatasetMapper):
         return dataset_dict
 
 
+class FiveBandDatasetMapper(CrowdAwareDatasetMapper):
+    """Loads 5-band BGR+DSM+dDSM via rasterio."""
+
+    def __call__(self, dataset_dict):
+        dataset_dict = copy.deepcopy(dataset_dict)
+        image = load_bgrdd_uint8(dataset_dict["file_name"])
+        utils.check_image_size(dataset_dict, image)
+
+        if "sem_seg_file_name" in dataset_dict:
+            sem_seg_gt = utils.read_image(dataset_dict.pop("sem_seg_file_name"), "L").squeeze(2)
+        else:
+            sem_seg_gt = None
+
+        aug_input = T.AugInput(image, sem_seg=sem_seg_gt)
+        transforms = self.augmentations(aug_input)
+        image, sem_seg_gt = aug_input.image, aug_input.sem_seg
+
+        image_shape = image.shape[:2]
+        dataset_dict["image"] = torch.as_tensor(np.ascontiguousarray(image.transpose(2, 0, 1)))
+        if sem_seg_gt is not None:
+            dataset_dict["sem_seg"] = torch.as_tensor(sem_seg_gt.astype("long"))
+
+        if self.proposal_topk is not None:
+            utils.transform_proposals(
+                dataset_dict, image_shape, transforms, proposal_topk=self.proposal_topk
+            )
+
+        if not self.is_train:
+            dataset_dict.pop("annotations", None)
+            dataset_dict.pop("sem_seg_file_name", None)
+            return dataset_dict
+
+        if "annotations" in dataset_dict:
+            transform_annotations_with_ignore(
+                self, dataset_dict, transforms, image_shape
+            )
+
+        return dataset_dict
+
+
 class BoulderTrainer(DefaultTrainer):
     four_band: bool = False
+    five_band: bool = False
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -102,7 +144,9 @@ class BoulderTrainer(DefaultTrainer):
 
     @classmethod
     def build_train_loader(cls, cfg):
-        if cls.four_band:
+        if cls.five_band:
+            mapper = FiveBandDatasetMapper(cfg, is_train=True)
+        elif cls.four_band:
             mapper = FourBandDatasetMapper(cfg, is_train=True)
         else:
             mapper = CrowdAwareDatasetMapper(cfg, is_train=True)
@@ -110,6 +154,9 @@ class BoulderTrainer(DefaultTrainer):
 
     @classmethod
     def build_test_loader(cls, cfg, dataset_name):
+        if cls.five_band:
+            mapper = FiveBandDatasetMapper(cfg, is_train=False)
+            return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
         if cls.four_band:
             mapper = FourBandDatasetMapper(cfg, is_train=False)
             return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
@@ -154,6 +201,7 @@ def build_cfg(
     device: str = "cpu",
     num_classes: int = 1,
     four_band: bool = False,
+    five_band: bool = False,
     image_size: int = 2000,
     eval_during_train: bool = True,
     checkpoint_period: int | None = None,
@@ -204,7 +252,10 @@ def build_cfg(
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.DEVICE = device
 
-    if four_band:
+    if five_band:
+        cfg.MODEL.PIXEL_MEAN = FIVE_BAND_PIXEL_MEAN
+        cfg.MODEL.PIXEL_STD = FIVE_BAND_PIXEL_STD
+    elif four_band:
         # len(PIXEL_MEAN) sets ResNet stem in_channels via ShapeSpec.
         cfg.MODEL.PIXEL_MEAN = FOUR_BAND_PIXEL_MEAN
         cfg.MODEL.PIXEL_STD = FOUR_BAND_PIXEL_STD
@@ -281,6 +332,14 @@ def main() -> None:
         help="Train on 4-band RGB+DSM GeoTIFFs (custom mapper + 4-channel stem).",
     )
     parser.add_argument(
+        "--five-band",
+        action="store_true",
+        help=(
+            "Train on 5-band RGB+DSM+dDSM GeoTIFFs. Pass --weights to a 4-band "
+            "model_final.pth to fine-tune (stem expands 4→5)."
+        ),
+    )
+    parser.add_argument(
         "--weights",
         type=Path,
         default=None,
@@ -329,7 +388,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.four_band and args.five_band:
+        raise SystemExit("Pass only one of --four-band / --five-band")
+    if args.five_band and args.weights is None and not args.resume:
+        raise SystemExit(
+            "--five-band fine-tune requires --weights pointing at a 4-band "
+            "model_final.pth (or --resume an existing 5-band run)."
+        )
+
     BoulderTrainer.four_band = args.four_band
+    BoulderTrainer.five_band = args.five_band
     class_names = register_datasets(args.dataset_dir)
     cfg = build_cfg(
         args.dataset_dir,
@@ -340,6 +408,7 @@ def main() -> None:
         device=args.device,
         num_classes=len(class_names),
         four_band=args.four_band,
+        five_band=args.five_band,
         image_size=args.image_size,
         eval_during_train=not args.no_eval,
         checkpoint_period=args.checkpoint_period,
@@ -348,11 +417,18 @@ def main() -> None:
     if args.no_rich_aug:
         cfg.INPUT.BOULDER_RICH_AUG = False
         cfg.INPUT.RANDOM_FLIP = "horizontal"
-    if args.weights is not None:
+    if args.five_band and not args.resume:
+        # Avoid loading 4-band weights via checkpointer (stem shape mismatch).
+        # Model is built empty-ish from zoo URL then we load expanded weights.
+        cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(
+            "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+        )
+    elif args.weights is not None:
         cfg.MODEL.WEIGHTS = str(args.weights)
 
     print("Classes:", class_names)
     print("Four-band:", args.four_band)
+    print("Five-band:", args.five_band)
     ds_summary = summarize_dataset(args.dataset_dir)
     print("Dataset summary:", json.dumps(ds_summary, indent=2))
     print("Train images registered:", len(DatasetCatalog.get("boulder_train")))
@@ -368,6 +444,7 @@ def main() -> None:
         tool="train_boulder_local.py",
         flags={
             "four_band": bool(args.four_band),
+            "five_band": bool(args.five_band),
             "rich_aug": not bool(args.no_rich_aug),
             "no_rich_aug": bool(args.no_rich_aug),
             "max_iter": args.max_iter,
@@ -391,18 +468,21 @@ def main() -> None:
     zoo_weights = cfg.MODEL.WEIGHTS
 
     trainer = BoulderTrainer(cfg)
-    trainer.resume_or_load(resume=args.resume)
+    if args.five_band and not args.resume:
+        # Build model with zoo URL (partial load), then replace with expanded 4-band weights.
+        trainer.resume_or_load(resume=False)
+        print(f"Expanding 4→5 band stem from {args.weights}")
+        load_four_band_weights_into_five_band(trainer.model, args.weights)
+    else:
+        trainer.resume_or_load(resume=args.resume)
+        if args.four_band and not args.resume:
+            local_zoo = Path(zoo_weights)
+            if not local_zoo.exists():
+                from detectron2.utils.file_io import PathManager
 
-    if args.four_band and not args.resume:
-        # COCO stem is 3-channel and was skipped; copy RGB weights and init DSM channel.
-        local_zoo = Path(zoo_weights)
-        if not local_zoo.exists():
-            # model_zoo URL was resolved by checkpointer; use cached file if present
-            from detectron2.utils.file_io import PathManager
-
-            local_zoo = Path(PathManager.get_local_path(zoo_weights))
-        print(f"Patching 4-channel stem from {local_zoo}")
-        patch_four_band_stem_from_checkpoint(trainer.model, local_zoo)
+                local_zoo = Path(PathManager.get_local_path(zoo_weights))
+            print(f"Patching 4-channel stem from {local_zoo}")
+            patch_four_band_stem_from_checkpoint(trainer.model, local_zoo)
 
     trainer.train()
 
