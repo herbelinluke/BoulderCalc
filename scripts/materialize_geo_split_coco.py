@@ -317,6 +317,23 @@ def main() -> None:
         )
     )
 
+    from run_provenance import write_dataset_provenance
+
+    write_dataset_provenance(
+        args.output_dir,
+        tool="materialize_geo_split_coco.py",
+        flags={
+            "split_config": str(args.split_config),
+            "setup_id": split_config.get("id"),
+            "pool_dir": str(args.pool_dir),
+            "link_mode": link_mode,
+            "years": args.years,
+        },
+        splits_summary=summary,
+        parents=[args.pool_dir],
+        notes="Geo-split view of a shared offline-aug pool (hardlink/symlink/copy).",
+    )
+
 
 if __name__ == "__main__":
     main()

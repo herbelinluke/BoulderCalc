@@ -282,6 +282,11 @@ Pass several `--split-config` YAMLs to average the same per‑tile scores over e
 geo‑setup’s test membership (check whether baseline hold‑outs are intrinsically
 easier).
 
+**Provenance sidecars.** Dataset and training scripts write JSON next to their
+outputs (`dataset_provenance.json`, `training_run_provenance.json`, …) capturing
+flags such as jitter, drop/iscrowd modes, `--four-band`, and `--no-rich-aug`.
+See [§13](#13-per-script-cli-reference) (`run_provenance.py`).
+
 ## 12. Boulder matching
 
 The matcher (in `Matching/`) pairs boulder polygons between two surveys
@@ -385,6 +390,17 @@ guest friendly, no extra disk).
 
 **`scripts/coco_eval_with_recall.py`** — internal evaluator (no CLI); adds
 `AR1/AR10/AR100/ARs/ARm/ARl` to saved metrics.
+
+**`scripts/run_provenance.py`** — writes / shows sidecars that record dataset and
+training flags (`dataset_provenance.json`, `tiling_provenance.json`,
+`training_run_provenance.json`). Auto-written by `gpkg_to_coco`,
+`augment_coco_dataset`, `build_coco_rgb_dsm`, `build_rgb_dsm_tiles`,
+`materialize_geo_split_coco`, and `train_boulder_local`. Inspect with:
+
+```bash
+python BoulderCalculator/scripts/run_provenance.py segmentation/coco_dataset_both
+python BoulderCalculator/scripts/run_provenance.py segmentation/training_run_geo_baseline
+```
 
 **`scripts/eval_compare_runs.py`** — compare many `metrics_valid.json` + plot
 eval curves from `metrics.json`. `--runs name=path` (repeatable), or

@@ -434,6 +434,24 @@ def main() -> None:
             )
     print(json.dumps(summary, indent=2))
 
+    from run_provenance import write_dataset_provenance
+
+    write_dataset_provenance(
+        args.output_dir,
+        tool="augment_coco_dataset.py",
+        flags={
+            "jitter": args.jitter,
+            "jitter_enabled": args.jitter > 0,
+            "variants": variants,
+            "seed": args.seed,
+            "splits_augmented": augment_splits,
+            "input_dir": str(args.input_dir),
+        },
+        splits_summary=summary,
+        parents=[args.input_dir],
+        notes="Offline geometric (+ optional photometric jitter) augmentation.",
+    )
+
 
 if __name__ == "__main__":
     main()

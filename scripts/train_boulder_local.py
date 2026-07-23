@@ -44,6 +44,7 @@ from multiband_io import (  # noqa: E402
     load_bgrd_uint8,
     patch_four_band_stem_from_checkpoint,
 )
+from run_provenance import update_training_metrics, write_training_provenance  # noqa: E402
 
 # Ensure custom meta-arch / RPN / ROI heads are registered (side effects).
 _ = (GeneralizedRCNNWithIgnore, RPNWithIgnore, StandardROIHeadsWithIgnore)
@@ -352,13 +353,39 @@ def main() -> None:
 
     print("Classes:", class_names)
     print("Four-band:", args.four_band)
-    print("Dataset summary:", json.dumps(summarize_dataset(args.dataset_dir), indent=2))
+    ds_summary = summarize_dataset(args.dataset_dir)
+    print("Dataset summary:", json.dumps(ds_summary, indent=2))
     print("Train images registered:", len(DatasetCatalog.get("boulder_train")))
     print("Output dir:", cfg.OUTPUT_DIR)
     print("MAX_ITER:", cfg.SOLVER.MAX_ITER)
     print("CHECKPOINT_PERIOD:", cfg.SOLVER.CHECKPOINT_PERIOD)
     print("EVAL_PERIOD:", cfg.TEST.EVAL_PERIOD)
     print("PIXEL_MEAN:", list(cfg.MODEL.PIXEL_MEAN))
+    print("Rich aug:", not args.no_rich_aug)
+
+    write_training_provenance(
+        args.output_dir,
+        tool="train_boulder_local.py",
+        flags={
+            "four_band": bool(args.four_band),
+            "rich_aug": not bool(args.no_rich_aug),
+            "no_rich_aug": bool(args.no_rich_aug),
+            "max_iter": args.max_iter,
+            "batch_size": args.batch_size,
+            "num_workers": args.num_workers,
+            "device": args.device,
+            "image_size": args.image_size,
+            "no_eval": bool(args.no_eval),
+            "resume": bool(args.resume),
+            "weights": str(args.weights) if args.weights else None,
+            "checkpoint_period": cfg.SOLVER.CHECKPOINT_PERIOD,
+            "eval_period": cfg.TEST.EVAL_PERIOD,
+            "pixel_mean": list(cfg.MODEL.PIXEL_MEAN),
+            "pixel_std": list(cfg.MODEL.PIXEL_STD),
+        },
+        dataset_dir=args.dataset_dir,
+        dataset_summary=ds_summary,
+    )
 
     # Cache zoo weights path before resume_or_load (needed to patch 4-channel stem).
     zoo_weights = cfg.MODEL.WEIGHTS
@@ -389,6 +416,7 @@ def main() -> None:
     eval_results = trainer.test(cfg, trainer.model, evaluators=[evaluator])
     (args.output_dir / "metrics_valid.json").write_text(json.dumps(eval_results, indent=2))
     print("Validation metrics:", json.dumps(eval_results, indent=2))
+    update_training_metrics(args.output_dir, eval_results)
 
 
 if __name__ == "__main__":

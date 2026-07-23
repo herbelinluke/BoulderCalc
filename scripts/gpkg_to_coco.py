@@ -1406,6 +1406,45 @@ def main() -> None:
     ]
     print(json.dumps(summary, indent=2))
 
+    from run_provenance import write_dataset_provenance
+
+    deposits_mode = (
+        "drop"
+        if args.drop_deposits
+        else ("iscrowd" if args.boulder_only else "trainable_class")
+    )
+    small_boulder_mode = (
+        "trainable"
+        if args.min_area_m2 <= 0
+        else ("drop" if args.drop_below_min_area else "iscrowd")
+    )
+    write_dataset_provenance(
+        output_dir,
+        tool="gpkg_to_coco.py",
+        flags={
+            "years": years,
+            "min_area_m2": args.min_area_m2,
+            "boulder_only": bool(args.boulder_only),
+            "drop_below_min_area": bool(args.drop_below_min_area),
+            "drop_deposits": bool(args.drop_deposits),
+            "deposits_mode": deposits_mode,
+            "small_boulder_mode": small_boulder_mode,
+            "gpkg": [
+                {"path": str(p), "year": y} for p, y in gpkg_specs
+            ],
+            "roi": None
+            if (args.no_roi or args.roi is None or str(args.roi).lower() == "none")
+            else str(args.roi),
+            "split_config": str(args.split_config) if args.split_config else None,
+            "tiles_used": str(args.tiles_used) if args.tiles_used else None,
+            "n_train_tiles": len(train_tiles),
+            "n_valid_tiles": len(valid_tiles),
+            "n_test_tiles": len(test_tiles),
+        },
+        splits_summary=summary,
+        notes="COCO from GPKG; iscrowd/drop behavior summarized in deposits_mode / small_boulder_mode.",
+    )
+
 
 if __name__ == "__main__":
     main()
