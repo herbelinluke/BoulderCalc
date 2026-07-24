@@ -408,9 +408,14 @@ eval curves from `metrics.json`. `--runs name=path` (repeatable), or
 `--output-dir`, `--metrics` (defaults include AP50/AR100).
 
 **`scripts/eval_per_tile.py`** — per‑tile COCO AP/AR + precision/recall heatmaps.
-`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split` + `--model`;
-`--merge-iou` (optional NMS), `--extents` (GeoJSON for QGIS), `--split-config`
-(repeatable; difficulty summary), `--four-band`, `--device`, `--output-dir`*.
+`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split`/`--splits` + `--model`;
+`--require-gt` (skip empty hold-outs), `--merge-iou` (optional NMS), `--extents`,
+`--split-config` (repeatable), `--four-band`, `--device` (cpu|cuda), `--output-dir`*.
+Writes `holdout_quality.json` / `empty_gt_tiles.csv` and separate heatmaps per split.
+
+**`scripts/summarize_holdout_quality.py`** — re-summarize existing
+`per_tile_metrics.csv` dirs (no GPU): with-GT means, empty-tile FP lists,
+comparison CSV. `--eval-dir` (repeatable), `--output-dir`.
 
 **Matching** — see [§12](#12-boulder-matching) and `Matching/README.md`.
 
