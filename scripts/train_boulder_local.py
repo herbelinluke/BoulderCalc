@@ -28,6 +28,8 @@ from detectron2.data import detection_utils as utils
 from detectron2.data import transforms as T
 from detectron2.data.datasets import register_coco_instances
 from detectron2.engine import DefaultTrainer
+from detectron2.engine.hooks import BestCheckpointer, HookBase
+from detectron2.utils import comm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from coco_eval_with_recall import BoulderCOCOEvaluator  # noqa: E402
@@ -48,6 +50,63 @@ from run_provenance import update_training_metrics, write_training_provenance  #
 
 # Ensure custom meta-arch / RPN / ROI heads are registered (side effects).
 _ = (GeneralizedRCNNWithIgnore, RPNWithIgnore, StandardROIHeadsWithIgnore)
+
+
+class EarlyStoppingHook(HookBase):
+    """Stop training when ``val_metric`` has not improved for ``patience_iters``.
+
+    Must run after ``EvalHook`` so the latest metric is in event storage.
+    Sets ``trainer.max_iter`` so the train loop exits after the current step.
+    """
+
+    def __init__(
+        self,
+        eval_period: int,
+        patience_iters: int,
+        val_metric: str = "segm/AP",
+        mode: str = "max",
+    ) -> None:
+        if patience_iters < 1:
+            raise ValueError("patience_iters must be >= 1")
+        if mode not in ("max", "min"):
+            raise ValueError(f'mode must be "max" or "min", got {mode!r}')
+        self._period = eval_period
+        self._patience_iters = patience_iters
+        self._val_metric = val_metric
+        self._compare = (lambda a, b: a > b) if mode == "max" else (lambda a, b: a < b)
+        self.best_metric: float | None = None
+        self.best_iter: int | None = None
+        self.stopped_early = False
+
+    def _maybe_stop(self) -> None:
+        metric_tuple = self.trainer.storage.latest().get(self._val_metric)
+        if metric_tuple is None:
+            return
+        latest_metric, metric_iter = metric_tuple
+        if self.best_metric is None or self._compare(latest_metric, self.best_metric):
+            self.best_metric = latest_metric
+            self.best_iter = metric_iter
+            return
+        assert self.best_iter is not None
+        stalled = metric_iter - self.best_iter
+        if stalled < self._patience_iters:
+            return
+        # End after this iteration (train loop is for iter in range(start, max_iter)).
+        new_max = self.trainer.iter + 1
+        if new_max < self.trainer.max_iter:
+            print(
+                f"[early-stop] {self._val_metric} best={self.best_metric:.4f} @ "
+                f"iter {self.best_iter}; no improvement for {stalled} iters "
+                f"(patience={self._patience_iters}). Stopping at iter {self.trainer.iter}.",
+                flush=True,
+            )
+            self.trainer.max_iter = new_max
+            self.stopped_early = True
+
+    def after_step(self) -> None:
+        next_iter = self.trainer.iter + 1
+        if self._period > 0 and next_iter % self._period == 0 and next_iter != self.trainer.max_iter:
+            self._maybe_stop()
 
 
 class FourBandDatasetMapper(CrowdAwareDatasetMapper):
@@ -92,6 +151,8 @@ class FourBandDatasetMapper(CrowdAwareDatasetMapper):
 
 class BoulderTrainer(DefaultTrainer):
     four_band: bool = False
+    early_stop_patience_iters: int = 0
+    early_stop_metric: str = "segm/AP"
 
     @classmethod
     def build_evaluator(cls, cfg, dataset_name, output_folder=None):
@@ -114,6 +175,30 @@ class BoulderTrainer(DefaultTrainer):
             mapper = FourBandDatasetMapper(cfg, is_train=False)
             return build_detection_test_loader(cfg, dataset_name, mapper=mapper)
         return super().build_test_loader(cfg, dataset_name)
+
+    def build_hooks(self):
+        ret = super().build_hooks()
+        # Append after EvalHook so storage has the latest val metrics.
+        if self.early_stop_patience_iters > 0 and self.cfg.TEST.EVAL_PERIOD > 0:
+            if comm.is_main_process():
+                ret.append(
+                    BestCheckpointer(
+                        self.cfg.TEST.EVAL_PERIOD,
+                        self.checkpointer,
+                        self.early_stop_metric,
+                        mode="max",
+                        file_prefix="model_best",
+                    )
+                )
+            ret.append(
+                EarlyStoppingHook(
+                    self.cfg.TEST.EVAL_PERIOD,
+                    patience_iters=self.early_stop_patience_iters,
+                    val_metric=self.early_stop_metric,
+                    mode="max",
+                )
+            )
+        return ret
 
 
 def dataset_class_names(base_path: Path) -> list[str]:
@@ -327,9 +412,33 @@ def main() -> None:
             "min(50, max_iter//2). Ignored with --no-eval."
         ),
     )
+    parser.add_argument(
+        "--early-stop-patience-iters",
+        type=int,
+        default=0,
+        help=(
+            "Stop when --early-stop-metric has not improved for this many "
+            "iterations since the best eval (0=disabled). Typical: 500–1000 "
+            "with --eval-period 500. Saves model_best.pth on improvements. "
+            "Requires periodic eval (not --no-eval)."
+        ),
+    )
+    parser.add_argument(
+        "--early-stop-metric",
+        default="segm/AP",
+        help="Event-storage key watched by early stopping (default: segm/AP).",
+    )
     args = parser.parse_args()
 
+    if args.early_stop_patience_iters > 0 and args.no_eval:
+        raise SystemExit(
+            "--early-stop-patience-iters requires periodic validation; "
+            "remove --no-eval."
+        )
+
     BoulderTrainer.four_band = args.four_band
+    BoulderTrainer.early_stop_patience_iters = max(0, args.early_stop_patience_iters)
+    BoulderTrainer.early_stop_metric = args.early_stop_metric
     class_names = register_datasets(args.dataset_dir)
     cfg = build_cfg(
         args.dataset_dir,
@@ -362,6 +471,13 @@ def main() -> None:
     print("EVAL_PERIOD:", cfg.TEST.EVAL_PERIOD)
     print("PIXEL_MEAN:", list(cfg.MODEL.PIXEL_MEAN))
     print("Rich aug:", not args.no_rich_aug)
+    if BoulderTrainer.early_stop_patience_iters > 0:
+        print(
+            "Early stop:",
+            BoulderTrainer.early_stop_patience_iters,
+            "iters without improve on",
+            BoulderTrainer.early_stop_metric,
+        )
 
     write_training_provenance(
         args.output_dir,
@@ -380,6 +496,8 @@ def main() -> None:
             "weights": str(args.weights) if args.weights else None,
             "checkpoint_period": cfg.SOLVER.CHECKPOINT_PERIOD,
             "eval_period": cfg.TEST.EVAL_PERIOD,
+            "early_stop_patience_iters": BoulderTrainer.early_stop_patience_iters,
+            "early_stop_metric": BoulderTrainer.early_stop_metric,
             "pixel_mean": list(cfg.MODEL.PIXEL_MEAN),
             "pixel_std": list(cfg.MODEL.PIXEL_STD),
         },

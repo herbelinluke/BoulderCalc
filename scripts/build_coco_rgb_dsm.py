@@ -17,9 +17,17 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import rasterio
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from skip_existing import (  # noqa: E402
+    add_force_argument,
+    should_skip_coco_dataset,
+    should_skip_file,
+)
 
 
 def resolve_four_band(tile_dirs: list[Path], file_name: str) -> Path:
@@ -50,23 +58,36 @@ def copy_split(
     split: str,
     ann_name: str,
     tile_dirs: list[Path],
+    *,
+    force: bool,
 ) -> dict:
     ann_src = source_coco / ann_name
-    data = json.loads(ann_src.read_text())
+    data = json.loads(ann_src.read_text(encoding="utf-8"))
     split_out = output_dir / split
     split_out.mkdir(parents=True, exist_ok=True)
 
     copied = []
+    skipped = 0
     for image in data["images"]:
+        dst = split_out / image["file_name"]
+        if should_skip_file(dst, force=force):
+            skipped += 1
+            copied.append(image["file_name"])
+            continue
         src = resolve_four_band(tile_dirs, image["file_name"])
         assert_four_bands(src)
-        dst = split_out / image["file_name"]
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         copied.append(image["file_name"])
 
-    (output_dir / ann_name).write_text(json.dumps(data))
-    return {"split": split, "images": len(copied), "ann": ann_name}
+    (output_dir / ann_name).write_text(json.dumps(data), encoding="utf-8")
+    return {
+        "split": split,
+        "images": len(copied),
+        "copied": len(copied) - skipped,
+        "skipped": skipped,
+        "ann": ann_name,
+    }
 
 
 def main() -> None:
@@ -90,7 +111,16 @@ def main() -> None:
         default=Path("segmentation/coco_dataset_rgb_dsm"),
         help="Output 4-band COCO dataset dir. Default: segmentation/coco_dataset_rgb_dsm",
     )
+    add_force_argument(parser)
     args = parser.parse_args()
+
+    if should_skip_coco_dataset(
+        args.output_dir,
+        force=args.force,
+        label="build_coco_rgb_dsm",
+        expected_flags={"four_band": True},
+    ):
+        return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary = []
@@ -99,10 +129,26 @@ def main() -> None:
         ("valid", "validation_annotations.json"),
         ("test", "testing_annotations.json"),
     ]:
-        summary.append(copy_split(args.source_coco, args.output_dir, split, ann, args.tile_dirs))
+        summary.append(
+            copy_split(
+                args.source_coco,
+                args.output_dir,
+                split,
+                ann,
+                args.tile_dirs,
+                force=args.force,
+            )
+        )
 
-    out = {"source": str(args.source_coco), "output": str(args.output_dir), "splits": summary}
-    (args.output_dir / "build_coco_rgb_dsm_summary.json").write_text(json.dumps(out, indent=2))
+    out = {
+        "source": str(args.source_coco),
+        "output": str(args.output_dir),
+        "force": bool(args.force),
+        "splits": summary,
+    }
+    (args.output_dir / "build_coco_rgb_dsm_summary.json").write_text(
+        json.dumps(out, indent=2), encoding="utf-8"
+    )
     print(json.dumps(out, indent=2))
 
     from run_provenance import write_dataset_provenance
@@ -114,6 +160,7 @@ def main() -> None:
             "source_coco": str(args.source_coco),
             "tile_dirs": [str(d) for d in args.tile_dirs],
             "four_band": True,
+            "force": bool(args.force),
         },
         splits_summary=summary,
         parents=[args.source_coco, *args.tile_dirs],
