@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""512×512 geo-split weekend: RGB + RGB+DSM × five setups (10 trains).
+"""512×512 geo-split weekend: RGB / RGB+DSM / RGB+local-relief × five setups.
 
 Retiles annotated 2000×2000 parents into 512 chips (no resampling), builds
 shared hard-linked COCO pools with offline 8×+jitter, materializes each geo
 setup, and trains with ``--image-size 512 --batch-size 4 --no-rich-aug``.
+
+Local-relief band 4 defaults (see build_rgb_dsm_tiles.py):
+  fixed 0.5 m positive-only clip, Gaussian radius 10 m, DEM padded ~60 m
+  beyond the parent (not a per-tile 2–98% stretch).
 
 Windows guest defaults: ``--link-mode hard`` everywhere, skip-existing unless
 ``--force``. Reuses existing geo_splits/*.yaml (parent-level membership; chips
@@ -13,6 +17,9 @@ Run from project root:
 
   python BoulderCalculator/experiments/geo_splits_512/smoke_geo_splits_512.py --mode smoke --device cuda
   python BoulderCalculator/experiments/geo_splits_512/smoke_geo_splits_512.py --mode weekend --device cuda
+  # local-relief only (5 trains):
+  python BoulderCalculator/experiments/geo_splits_512/smoke_geo_splits_512.py \\
+      --mode weekend --device cuda --modalities rgb_local_relief
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ SETUPS = (
     "sporadic_aligned",
 )
 
-MODALITIES = ("rgb", "rgb_dsm")
+MODALITIES = ("rgb", "rgb_dsm", "rgb_local_relief")
 
 EXP_DIR = Path(__file__).resolve().parent
 GEO_SPLITS_DIR = EXP_DIR.parent / "geo_splits"
@@ -44,9 +51,23 @@ POOL_RGB = "coco_geo512_all"
 POOL_RGB_AUG = "coco_geo512_all_aug"
 POOL_4B = "coco_geo512_all_rgb_dsm"
 POOL_4B_AUG = "coco_geo512_all_rgb_dsm_aug"
+POOL_LR = "coco_geo512_all_rgb_local_relief"
+POOL_LR_AUG = "coco_geo512_all_rgb_local_relief_aug"
 TILE_RGB = "tiling_512"
 TILE_4B_24 = "tiling_512_rgb_dsm_24"
 TILE_4B_25 = "tiling_512_rgb_dsm_25"
+TILE_LR_24 = "tiling_512_rgb_dsm_local_relief_24"
+TILE_LR_25 = "tiling_512_rgb_dsm_local_relief_25"
+
+# Local-relief encoding (computed on padded parents, then chipped).
+RELIEF_RADIUS_M = 10.0
+RELIEF_CLIP_M = 0.5
+RELIEF_STRETCH = "fixed"
+RELIEF_CONTEXT_BUFFER_M = 60.0
+
+
+def is_four_band(modality: str) -> bool:
+    return modality in ("rgb_dsm", "rgb_local_relief")
 
 
 def project_root_from_cwd() -> Path:
@@ -67,21 +88,43 @@ def run(cmd: list[str], *, label: str) -> None:
     print(f"[OK] {label} ({elapsed:.1f}s)", flush=True)
 
 
-def ensure_parent_rgb_dsm(root: Path, py: str, force: bool) -> None:
-    """Build parent 2000×2000 RGB+DSM tiles needed before 4-band retile."""
+def ensure_parent_rgb_dsm(
+    root: Path,
+    py: str,
+    force: bool,
+    *,
+    dsm_mode: str = "elevation",
+) -> None:
+    """Build parent 2000×2000 RGB+band4 tiles needed before 4-band retile."""
     for year in (24, 25):
         cmd = [
             py,
             str(SCRIPTS / "build_rgb_dsm_tiles.py"),
             "--year",
             str(year),
+            "--dsm-mode",
+            dsm_mode,
         ]
+        if dsm_mode == "local_relief":
+            cmd.extend(
+                [
+                    "--relief-radius-m",
+                    str(RELIEF_RADIUS_M),
+                    "--relief-stretch",
+                    RELIEF_STRETCH,
+                    "--relief-clip-m",
+                    str(RELIEF_CLIP_M),
+                    "--relief-positive-only",
+                    "--relief-context-buffer-m",
+                    str(RELIEF_CONTEXT_BUFFER_M),
+                ]
+            )
         if force:
             cmd.append("--force")
-        run(cmd, label=f"parent build_rgb_dsm_tiles year={year}")
+        run(cmd, label=f"parent build_rgb_dsm_tiles year={year} mode={dsm_mode}")
 
 
-def retile_all(root: Path, py: str, force: bool) -> None:
+def retile_all(root: Path, py: str, force: bool, modalities: list[str]) -> None:
     seg = root / "segmentation"
     rgb_cmd = [
         py,
@@ -101,12 +144,27 @@ def retile_all(root: Path, py: str, force: bool) -> None:
         rgb_cmd.append("--force")
     run(rgb_cmd, label="retile RGB → tiling_512")
 
-    for year, out_name in ((24, TILE_4B_24), (25, TILE_4B_25)):
+    four_band_jobs: list[tuple[str, str, int]] = []
+    if "rgb_dsm" in modalities:
+        four_band_jobs.extend(
+            [
+                (f"tiling_rgb_dsm_{24}", TILE_4B_24, 24),
+                (f"tiling_rgb_dsm_{25}", TILE_4B_25, 25),
+            ]
+        )
+    if "rgb_local_relief" in modalities:
+        four_band_jobs.extend(
+            [
+                (f"tiling_rgb_dsm_local_relief_{24}", TILE_LR_24, 24),
+                (f"tiling_rgb_dsm_local_relief_{25}", TILE_LR_25, 25),
+            ]
+        )
+    for src_name, out_name, year in four_band_jobs:
         cmd = [
             py,
             str(SCRIPTS / "retile_to_chips.py"),
             "--source-dir",
-            str(seg / f"tiling_rgb_dsm_{year}"),
+            str(seg / src_name),
             "--output-dir",
             str(seg / out_name),
             "--chip-size",
@@ -119,7 +177,7 @@ def retile_all(root: Path, py: str, force: bool) -> None:
         ]
         if force:
             cmd.append("--force")
-        run(cmd, label=f"retile RGB+DSM → {out_name}")
+        run(cmd, label=f"retile → {out_name}")
 
 
 def build_modality_pool(
@@ -137,11 +195,19 @@ def build_modality_pool(
     if modality == "rgb":
         coco = seg / POOL_RGB
         coco_aug = seg / POOL_RGB_AUG
-        four_band = False
-    else:
+        tile_dirs: list[Path] | None = None
+    elif modality == "rgb_dsm":
         coco = seg / POOL_4B
         coco_aug = seg / POOL_4B_AUG
-        four_band = True
+        tile_dirs = [seg / TILE_4B_24, seg / TILE_4B_25]
+    elif modality == "rgb_local_relief":
+        coco = seg / POOL_LR
+        coco_aug = seg / POOL_LR_AUG
+        tile_dirs = [seg / TILE_LR_24, seg / TILE_LR_25]
+    else:
+        raise SystemExit(f"Unknown modality: {modality}")
+
+    four_band = is_four_band(modality)
 
     if (coco_aug / "train_annotations.json").is_file() and not force:
         print(f"[skip] shared aug pool present: {coco_aug}")
@@ -173,14 +239,15 @@ def build_modality_pool(
     run(gpkg_cmd, label="gpkg_to_coco chips → coco_geo512_all")
 
     if four_band:
+        assert tile_dirs is not None
         coco4_cmd = [
             py,
             str(SCRIPTS / "build_coco_rgb_dsm.py"),
             "--source-coco",
             str(rgb_coco),
             "--tile-dirs",
-            str(seg / TILE_4B_24),
-            str(seg / TILE_4B_25),
+            str(tile_dirs[0]),
+            str(tile_dirs[1]),
             "--output-dir",
             str(coco),
             "--link-mode",
@@ -188,7 +255,7 @@ def build_modality_pool(
         ]
         if force:
             coco4_cmd.append("--force")
-        run(coco4_cmd, label="build_coco_rgb_dsm chips → coco_geo512_all_rgb_dsm")
+        run(coco4_cmd, label=f"build_coco_rgb_dsm chips → {coco.name}")
         aug_in = coco
     else:
         aug_in = rgb_coco
@@ -278,7 +345,7 @@ def train_one(
         device,
         "--no-rich-aug",
     ]
-    if modality == "rgb_dsm":
+    if is_four_band(modality):
         train_cmd.append("--four-band")
     if no_eval:
         train_cmd.append("--no-eval")
@@ -305,7 +372,7 @@ def main() -> None:
     parser.add_argument(
         "--modalities",
         default="rgb,rgb_dsm",
-        help="Comma-separated: rgb, rgb_dsm (default both).",
+        help="Comma-separated: rgb, rgb_dsm, rgb_local_relief (default rgb,rgb_dsm).",
     )
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--num-workers", type=int, default=2)
@@ -384,8 +451,10 @@ def main() -> None:
 
     if not args.skip_retile:
         if "rgb_dsm" in modalities:
-            ensure_parent_rgb_dsm(root, py, force=args.force)
-        retile_all(root, py, force=args.force)
+            ensure_parent_rgb_dsm(root, py, args.force, dsm_mode="elevation")
+        if "rgb_local_relief" in modalities:
+            ensure_parent_rgb_dsm(root, py, args.force, dsm_mode="local_relief")
+        retile_all(root, py, args.force, modalities)
     else:
         print("[skip] retile")
 

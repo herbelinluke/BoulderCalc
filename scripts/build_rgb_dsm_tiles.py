@@ -7,7 +7,12 @@ Band order:
 
 DSM scaling modes:
   elevation     per-tile 2–98 percentile stretch of absolute elevation (default)
-  local_relief  DSM minus Gaussian-smoothed DSM, then percentile stretch
+  local_relief  DSM minus Gaussian-smoothed DSM, then fixed-meter or buffered
+                percentile stretch (see --relief-stretch)
+
+Local-relief context: Gaussian (and optional percentile stats) run on a DEM
+window padded beyond the 2000×2000 parent so cliffs/flat tiles do not dominate
+a tiny per-tile stretch and filter edge effects are reduced.
 
 Run from the project root (directory that contains ``segmentation/`` and
 ``2024/`` / ``2025/``). Paths are relative so the same commands work on
@@ -16,18 +21,22 @@ Linux and Windows.
 Example:
   python BoulderCalculator/scripts/build_rgb_dsm_tiles.py --year 25
   python BoulderCalculator/scripts/build_rgb_dsm_tiles.py --year 24 --tile-keys 14_15,15_10
+  python BoulderCalculator/scripts/build_rgb_dsm_tiles.py --year 24 --dsm-mode local_relief \\
+      --relief-stretch fixed --relief-clip-m 0.5 --relief-positive-only
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
 import numpy as np
 import rasterio
 from rasterio.warp import reproject, Resampling
+from rasterio.windows import Window
 from scipy.ndimage import gaussian_filter
 from tqdm import tqdm
 
@@ -55,12 +64,45 @@ def compute_local_relief(
     return dem - smooth
 
 
-def relief_to_uint8(relief: np.ndarray) -> np.ndarray:
-    finite = relief[np.isfinite(relief)]
+def relief_to_uint8(
+    relief: np.ndarray,
+    *,
+    stretch: str = "fixed",
+    clip_m: float = 0.5,
+    positive_only: bool = True,
+    pct: tuple[float, float] = (2.0, 98.0),
+    stats_relief: np.ndarray | None = None,
+) -> np.ndarray:
+    """Map local-relief meters → uint8.
+
+    ``fixed``: clip to [0, clip_m] (positive_only) or [-clip_m, clip_m], then scale.
+    ``percentile``: 2–98 (default) stretch; use ``stats_relief`` (e.g. buffered
+    context) for lo/hi so a flat or cliff parent does not set its own scale.
+    """
+    r = relief.astype(np.float32, copy=True)
+    if positive_only:
+        r = np.maximum(r, 0.0)
+
+    if stretch == "fixed":
+        hi = max(float(clip_m), 1e-6)
+        if positive_only:
+            scaled = np.clip(r / hi, 0.0, 1.0) * 255.0
+        else:
+            scaled = (np.clip(r, -hi, hi) + hi) / (2.0 * hi) * 255.0
+        return scaled.astype(np.uint8)
+
+    if stretch != "percentile":
+        raise ValueError(f"Unknown relief stretch: {stretch}")
+
+    sample = stats_relief if stats_relief is not None else r
+    sample = sample.astype(np.float32, copy=False)
+    if positive_only:
+        sample = np.maximum(sample, 0.0)
+    finite = sample[np.isfinite(sample)]
     if finite.size == 0:
         return np.zeros(relief.shape, dtype=np.uint8)
-    lo, hi = np.percentile(finite, [2, 98])
-    scaled = (relief - lo) / max(hi - lo, 1e-6)
+    lo, hi = np.percentile(finite, list(pct))
+    scaled = (r - lo) / max(hi - lo, 1e-6)
     return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
 
 
@@ -78,6 +120,35 @@ def warp_dem_to_tile(ortho_path: Path, dsm_path: Path) -> tuple[np.ndarray, rast
                 resampling=Resampling.bilinear,
             )
         return dem, ortho.profile.copy()
+
+
+def warp_dem_padded(
+    ortho_path: Path,
+    dsm_path: Path,
+    pad_px: int,
+) -> tuple[np.ndarray, rasterio.profiles.Profile, int, int, int]:
+    """Warp DSM onto ortho grid expanded by ``pad_px`` on each side."""
+    pad = max(0, int(pad_px))
+    with rasterio.open(ortho_path) as ortho:
+        h, w = ortho.height, ortho.width
+        profile = ortho.profile.copy()
+        if pad == 0:
+            dem, _ = warp_dem_to_tile(ortho_path, dsm_path)
+            return dem, profile, 0, h, w
+        new_h, new_w = h + 2 * pad, w + 2 * pad
+        expanded_transform = ortho.window_transform(Window(-pad, -pad, new_w, new_h))
+        dem = np.zeros((new_h, new_w), dtype=np.float32)
+        with rasterio.open(dsm_path) as dsm:
+            reproject(
+                source=rasterio.band(dsm, 1),
+                destination=dem,
+                src_transform=dsm.transform,
+                src_crs=dsm.crs,
+                dst_transform=expanded_transform,
+                dst_crs=ortho.crs,
+                resampling=Resampling.bilinear,
+            )
+        return dem, profile, pad, h, w
 
 
 def elevation_to_uint8(dem: np.ndarray) -> np.ndarray:
@@ -104,17 +175,50 @@ def build_rgb_dsm_tile(
     output_path: Path,
     dsm_mode: str,
     relief_radius_m: float,
+    *,
+    relief_stretch: str = "fixed",
+    relief_clip_m: float = 0.5,
+    relief_positive_only: bool = True,
+    relief_context_buffer_m: float | None = None,
+    relief_percentile_buffer_m: float = 60.0,
 ) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rgb = read_rgb_uint8(ortho_path)
-    dem, profile = warp_dem_to_tile(ortho_path, dsm_path)
-    pixel_size = abs(profile["transform"].a)
 
     if dsm_mode == "elevation":
+        dem, profile = warp_dem_to_tile(ortho_path, dsm_path)
         dsm_u8 = elevation_to_uint8(dem)
+        meta_extra = {"relief_stretch": None}
     elif dsm_mode == "local_relief":
-        relief = compute_local_relief(dem, pixel_size=pixel_size, radius_m=relief_radius_m)
-        dsm_u8 = relief_to_uint8(relief)
+        with rasterio.open(ortho_path) as ortho:
+            pixel_size = abs(ortho.transform.a)
+        # Pad enough for Gaussian (~3σ) and optional percentile context.
+        gauss_buf_m = 3.0 * float(relief_radius_m)
+        pct_buf_m = (
+            float(relief_percentile_buffer_m) if relief_stretch == "percentile" else 0.0
+        )
+        ctx_m = float(relief_context_buffer_m) if relief_context_buffer_m is not None else 0.0
+        pad_m = max(gauss_buf_m, pct_buf_m, ctx_m)
+        pad_px = int(math.ceil(pad_m / max(pixel_size, 1e-6)))
+        dem_pad, profile, pad, h, w = warp_dem_padded(ortho_path, dsm_path, pad_px)
+        relief_pad = compute_local_relief(
+            dem_pad, pixel_size=pixel_size, radius_m=relief_radius_m
+        )
+        relief = relief_pad[pad : pad + h, pad : pad + w]
+        dsm_u8 = relief_to_uint8(
+            relief,
+            stretch=relief_stretch,
+            clip_m=relief_clip_m,
+            positive_only=relief_positive_only,
+            stats_relief=relief_pad if relief_stretch == "percentile" else None,
+        )
+        meta_extra = {
+            "relief_stretch": relief_stretch,
+            "relief_clip_m": relief_clip_m,
+            "relief_positive_only": relief_positive_only,
+            "relief_pad_m": pad_m,
+            "relief_pad_px": pad_px,
+        }
     else:
         raise ValueError(f"Unknown dsm_mode: {dsm_mode}")
 
@@ -125,6 +229,12 @@ def build_rgb_dsm_tile(
         compress="deflate",
     )
     profile.pop("photometric", None)
+    band4_desc = f"dsm_{dsm_mode}"
+    if dsm_mode == "local_relief":
+        band4_desc = (
+            f"dsm_local_relief_{relief_stretch}"
+            f"{'_pos' if relief_positive_only else ''}"
+        )
     with rasterio.open(output_path, "w", **profile) as out:
         out.write(rgb[0], 1)
         out.write(rgb[1], 2)
@@ -133,7 +243,7 @@ def build_rgb_dsm_tile(
         out.set_band_description(1, "red")
         out.set_band_description(2, "green")
         out.set_band_description(3, "blue")
-        out.set_band_description(4, f"dsm_{dsm_mode}")
+        out.set_band_description(4, band4_desc)
 
     return {
         "ortho": str(ortho_path),
@@ -141,6 +251,7 @@ def build_rgb_dsm_tile(
         "dsm_mode": dsm_mode,
         "shape": [int(dsm_u8.shape[0]), int(dsm_u8.shape[1])],
         "bands": 4,
+        **meta_extra,
     }
 
 
@@ -241,7 +352,46 @@ def main() -> None:
         "--relief-radius-m",
         type=float,
         default=10.0,
-        help="Gaussian radius (m) for local_relief mode.",
+        help="Gaussian radius (m) for local_relief mode (default 10).",
+    )
+    parser.add_argument(
+        "--relief-stretch",
+        choices=["fixed", "percentile"],
+        default="fixed",
+        help=(
+            "local_relief → uint8: fixed meter clip (default) or percentile. "
+            "Percentile stats use a padded context (see --relief-percentile-buffer-m)."
+        ),
+    )
+    parser.add_argument(
+        "--relief-clip-m",
+        type=float,
+        default=0.5,
+        help="Fixed stretch: map [0, clip] (positive-only) or [-clip, clip] → uint8 (default 0.5 m).",
+    )
+    parser.add_argument(
+        "--relief-positive-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep only positive residual (boulders up). Default: on. Use --no-relief-positive-only for signed.",
+    )
+    parser.add_argument(
+        "--relief-context-buffer-m",
+        type=float,
+        default=None,
+        help=(
+            "Extra DEM pad (m) beyond auto Gaussian pad (~3× radius). "
+            "Default: none (auto pad only)."
+        ),
+    )
+    parser.add_argument(
+        "--relief-percentile-buffer-m",
+        type=float,
+        default=60.0,
+        help=(
+            "When --relief-stretch percentile: DEM/stats pad in meters beyond the "
+            "parent tile (default 60). Also enlarges Gaussian context."
+        ),
     )
     add_force_argument(parser)
     args = parser.parse_args()
@@ -291,6 +441,11 @@ def main() -> None:
                 out_path,
                 dsm_mode=args.dsm_mode,
                 relief_radius_m=args.relief_radius_m,
+                relief_stretch=args.relief_stretch,
+                relief_clip_m=args.relief_clip_m,
+                relief_positive_only=bool(args.relief_positive_only),
+                relief_context_buffer_m=args.relief_context_buffer_m,
+                relief_percentile_buffer_m=args.relief_percentile_buffer_m,
             )
         )
         n_built += 1
@@ -304,6 +459,8 @@ def main() -> None:
                 "built": n_built,
                 "skipped": n_skipped,
                 "force": bool(args.force),
+                "dsm_mode": args.dsm_mode,
+                "relief_stretch": args.relief_stretch if args.dsm_mode == "local_relief" else None,
                 "output_dir": str(args.output_dir),
                 "manifest": str(manifest),
             },
@@ -324,6 +481,11 @@ def main() -> None:
             "ortho_dir": str(args.ortho_dir),
             "dsm_mode": args.dsm_mode,
             "relief_radius_m": args.relief_radius_m,
+            "relief_stretch": args.relief_stretch,
+            "relief_clip_m": args.relief_clip_m,
+            "relief_positive_only": bool(args.relief_positive_only),
+            "relief_context_buffer_m": args.relief_context_buffer_m,
+            "relief_percentile_buffer_m": args.relief_percentile_buffer_m,
             "from_coco": str(args.from_coco) if args.from_coco else None,
             "tile_keys": args.tile_keys,
             "force": bool(args.force),
