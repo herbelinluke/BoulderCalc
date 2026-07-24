@@ -32,6 +32,7 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 from augment_coco_dataset import VALID_VARIANTS  # noqa: E402
+from file_link import link_or_copy  # noqa: E402
 from gpkg_to_coco import (  # noqa: E402
     expand_year_keys,
     load_split_config,
@@ -45,9 +46,11 @@ SPLIT_ANN = {
     "test": "testing_annotations.json",
 }
 
-# Year-prefixed ortho stems produced by gpkg_to_coco / build_coco_rgb_dsm.
-_STEM_24 = re.compile(r"^24_Sites1and2_2024_Orthomosaic_(\d+)_(\d+)$")
-_STEM_25 = re.compile(r"^25_25IniSouthOrt_(\d+)_(\d+)$")
+# Year-prefixed ortho stems (parent 2000 tiles and optional 512 chips `_rR_cC`).
+_STEM_24 = re.compile(
+    r"^24_Sites1and2_2024_Orthomosaic_(\d+)_(\d+)(?:_r\d+_c\d+)?$"
+)
+_STEM_25 = re.compile(r"^25_25IniSouthOrt_(\d+)_(\d+)(?:_r\d+_c\d+)?$")
 
 
 def strip_aug_variant(stem: str) -> str:
@@ -59,7 +62,7 @@ def strip_aug_variant(stem: str) -> str:
 
 
 def file_name_to_year_key(file_name: str) -> str | None:
-    """Map ``24_…_14_15.tif`` / ``…_14_15_hflip.tif`` → ``24_14_15``."""
+    """Map parent or chip COCO names (optional aug suffix) → ``24_14_15``."""
     stem = strip_aug_variant(Path(file_name).stem)
     m = _STEM_24.match(stem)
     if m:
@@ -116,64 +119,6 @@ def resolve_pool_image(pool_dir: Path, pool_split: str, file_name: str) -> Path:
         if path.is_file():
             return path
     raise FileNotFoundError(f"Pool image not found for {file_name!r} under {pool_dir}")
-
-
-def _unlink_dst(dst: Path) -> None:
-    if dst.exists() or dst.is_symlink():
-        dst.unlink()
-
-
-def link_or_copy(src: Path, dst: Path, mode: str) -> str:
-    """Create dst referring to src. Returns the mode actually used.
-
-    Modes:
-      hard    — os.link (same NTFS volume; no admin; no extra bytes)
-      symlink — os.symlink (needs admin or Developer Mode on Windows)
-      copy    — shutil.copy2 (full duplicate; avoid for large pools)
-      auto    — hard → symlink → copy
-    """
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    _unlink_dst(dst)
-    src = src.resolve()
-
-    def try_hard() -> bool:
-        try:
-            os.link(src, dst)
-            return True
-        except OSError:
-            return False
-
-    def try_symlink() -> bool:
-        try:
-            os.symlink(src, dst)
-            return True
-        except OSError:
-            return False
-
-    if mode == "copy":
-        shutil.copy2(src, dst)
-        return "copy"
-    if mode == "hard":
-        if not try_hard():
-            raise OSError(
-                f"Hard link failed for {dst.name}. Pool and output must be on "
-                "the same NTFS volume. Use --link-mode copy only as a last resort."
-            )
-        return "hard"
-    if mode == "symlink":
-        if not try_symlink():
-            raise OSError(
-                f"Symlink failed for {dst.name}. On Windows guest accounts enable "
-                "Developer Mode or run elevated, or use --link-mode hard (default)."
-            )
-        return "symlink"
-    # auto
-    if try_hard():
-        return "hard"
-    if try_symlink():
-        return "symlink"
-    shutil.copy2(src, dst)
-    return "copy"
 
 
 def materialize_split(

@@ -879,6 +879,55 @@ def convert_tile(
     return image_info, annotations, ann_id, per_class
 
 
+def list_chip_paths(tile_dir: Path, year_key_str: str) -> list[Path]:
+    """Find ``{parent_stem}_rR_cC.tif`` chips for a year-prefixed parent key."""
+    year, short = parse_year_key(year_key_str)
+    parent_name = tile_filename(short, year)
+    stem = Path(parent_name).stem
+    candidates_dirs = [
+        tile_dir / str(year),
+        tile_dir,
+    ]
+    found: list[Path] = []
+    for d in candidates_dirs:
+        if not d.is_dir():
+            continue
+        found.extend(sorted(d.glob(f"{stem}_r*_c*.tif")))
+    # Dedup while preserving order.
+    seen: set[Path] = set()
+    out: list[Path] = []
+    for path in found:
+        rp = path.resolve()
+        if rp not in seen:
+            seen.add(rp)
+            out.append(path)
+    return out
+
+
+def iter_split_images(
+    tile_keys: list[str],
+    tile_dir: Path,
+    *,
+    expand_chips: bool,
+) -> list[tuple[int, Path]]:
+    """Yield (tile_year, image_path) for parents or expanded chips."""
+    rows: list[tuple[int, Path]] = []
+    for key in tile_keys:
+        year, _ = parse_year_key(key)
+        if expand_chips:
+            chips = list_chip_paths(tile_dir, key)
+            if not chips:
+                raise FileNotFoundError(
+                    f"No chips found for {key} under {tile_dir} "
+                    f"(expected {{stem}}_r*_c*.tif). Run retile_to_chips.py first."
+                )
+            for chip in chips:
+                rows.append((year, chip))
+        else:
+            rows.append((year, resolve_tile_path(tile_dir, key)))
+    return rows
+
+
 def build_split(
     split_name: str,
     tile_keys: list[str],
@@ -890,7 +939,12 @@ def build_split(
     boulder_only: bool,
     drop_below_min_area: bool = False,
     drop_deposits: bool = False,
+    *,
+    expand_chips: bool = False,
+    link_mode: str = "copy",
 ) -> dict:
+    from file_link import link_or_copy
+
     split_image_dir = output_dir / split_name
     split_image_dir.mkdir(parents=True, exist_ok=True)
 
@@ -909,6 +963,7 @@ def build_split(
     two_class = (not boulder_only) and (not drop_deposits)
     categories = CATEGORIES_TWO if two_class else CATEGORIES_ONE
     years_used: set[int] = set()
+    link_modes_used: dict[str, int] = {}
 
     deposit_policy = (
         "drop deposits"
@@ -924,13 +979,14 @@ def build_split(
     else:
         small_policy = "no min-area filter"
 
-    for key in tile_keys:
-        year, _ = parse_year_key(key)
+    for year, src_image in iter_split_images(
+        tile_keys, tile_dir, expand_chips=expand_chips
+    ):
         years_used.add(year)
-        src_image = resolve_tile_path(tile_dir, key)
-        # Year-prefix copied filenames so 24/25 tiles never collide in one split dir.
+        # Year-prefix filenames so 24/25 tiles never collide in one split dir.
         dst_name = f"{year}_{src_image.name}"
-        shutil.copy2(src_image, split_image_dir / dst_name)
+        used = link_or_copy(src_image, split_image_dir / dst_name, link_mode)
+        link_modes_used[used] = link_modes_used.get(used, 0) + 1
 
         image_info, anns, ann_id, per_class = convert_tile(
             src_image,
@@ -975,7 +1031,7 @@ def build_split(
         "test": "testing_annotations.json",
     }[split_name]
     out_json = output_dir / ann_name
-    out_json.write_text(json.dumps(coco))
+    out_json.write_text(json.dumps(coco), encoding="utf-8")
     n_pos = per_class_total["boulder"] + per_class_total["deposit"]
     return {
         "split": split_name,
@@ -989,6 +1045,8 @@ def build_split(
         "dropped_small": per_class_total["dropped_small"],
         "dropped_deposit": per_class_total["dropped_deposit"],
         "trainable": n_pos,
+        "expand_chips": bool(expand_chips),
+        "link_modes": link_modes_used,
         "json": str(out_json),
         "image_dir": str(split_image_dir),
     }
@@ -1240,6 +1298,17 @@ def main() -> None:
         help="Write tile footprints GeoJSON into segmentation-dir/tile_extents/",
     )
     add_force_argument(parser)
+    from file_link import add_link_mode_argument
+
+    add_link_mode_argument(parser, default="copy")
+    parser.add_argument(
+        "--expand-chips",
+        action="store_true",
+        help=(
+            "Treat --tile-dir as a retile_to_chips output: for each parent key in "
+            "the split, include all matching {{stem}}_r*_c*.tif chips."
+        ),
+    )
     args = parser.parse_args()
 
     years = [args.year] if args.year is not None else parse_years(args.years, [24, 25])
@@ -1258,6 +1327,7 @@ def main() -> None:
             "drop_below_min_area": bool(args.drop_below_min_area),
             "drop_deposits": bool(args.drop_deposits),
             "split_config": str(args.split_config) if args.split_config else None,
+            "expand_chips": bool(args.expand_chips),
         },
     ):
         return
@@ -1398,6 +1468,8 @@ def main() -> None:
             args.boulder_only,
             drop_below_min_area=args.drop_below_min_area,
             drop_deposits=args.drop_deposits,
+            expand_chips=bool(args.expand_chips),
+            link_mode=args.link_mode,
         ),
         build_split(
             "valid",
@@ -1410,6 +1482,8 @@ def main() -> None:
             args.boulder_only,
             drop_below_min_area=args.drop_below_min_area,
             drop_deposits=args.drop_deposits,
+            expand_chips=bool(args.expand_chips),
+            link_mode=args.link_mode,
         ),
         build_split(
             "test",
@@ -1422,6 +1496,8 @@ def main() -> None:
             args.boulder_only,
             drop_below_min_area=args.drop_below_min_area,
             drop_deposits=args.drop_deposits,
+            expand_chips=bool(args.expand_chips),
+            link_mode=args.link_mode,
         ),
     ]
     print(json.dumps(summary, indent=2))
@@ -1460,6 +1536,8 @@ def main() -> None:
             "n_train_tiles": len(train_tiles),
             "n_valid_tiles": len(valid_tiles),
             "n_test_tiles": len(test_tiles),
+            "expand_chips": bool(args.expand_chips),
+            "link_mode": args.link_mode,
         },
         splits_summary=summary,
         notes="COCO from GPKG; iscrowd/drop behavior summarized in deposits_mode / small_boulder_mode.",

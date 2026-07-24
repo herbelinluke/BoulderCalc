@@ -43,7 +43,8 @@ back here for the workflow:
 - **Linux / portable (USB):** [`setup/README_PORTABLE.md`](setup/README_PORTABLE.md)
 - **Windows (normal/admin):** [`setup/README_WINDOWS.md`](setup/README_WINDOWS.md)
 - **Windows (guest / no admin / long‑path issues):** [`setup/README_WINDOWS_GUEST.md`](setup/README_WINDOWS_GUEST.md)
-- **Geo-split weekend experiment (RGB+DSM, five region setups):** [`experiments/geo_splits/README.md`](experiments/geo_splits/README.md)
+- **Elevation vs local-relief DSM:** see branch `exp/local-relief-dsm`
+- **512×512 geo-split weekend (RGB + RGB+DSM):** [`experiments/geo_splits_512/README.md`](experiments/geo_splits_512/README.md)
 
 All three install the same stack: a Python 3.10/3.11 environment,
 `setup/requirements-training.txt`, GPU PyTorch, and Detectron2 (wheel on Linux,
