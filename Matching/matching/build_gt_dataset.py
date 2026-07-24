@@ -194,10 +194,31 @@ def main():
     parser.add_argument("--candidate-radius", type=float, default=25.0)
     parser.add_argument("--candidate-min-score", type=float, default=0.35)
     parser.add_argument("--no-dedupe", action="store_true")
-    parser.add_argument("--before-dsm", type=Path, default=None)
-    parser.add_argument("--after-dsm", type=Path, default=None)
-    parser.add_argument("--compute-volume", action="store_true")
+    parser.add_argument(
+        "--before-dsm",
+        type=Path,
+        default=root / "2024" / "Sites1and2_2024_DSM_30mm.tif",
+    )
+    parser.add_argument(
+        "--after-dsm",
+        type=Path,
+        default=root / "2025" / "25IniSouthDSM.tif",
+    )
+    parser.add_argument(
+        "--compute-volume",
+        action="store_true",
+        default=True,
+        help="Estimate DSM volumes while building (default: on when DSMs exist)",
+    )
+    parser.add_argument(
+        "--no-volume",
+        action="store_true",
+        help="Skip DSM volume estimation",
+    )
     args = parser.parse_args()
+
+    if args.no_volume:
+        args.compute_volume = False
 
     if args.before_polygons and args.after_polygons:
         before = gpd.read_file(args.before_polygons)
@@ -224,6 +245,15 @@ def main():
         source["bbox"] = list(bbox)
         print(f"BBox filter → before={len(before)} after={len(after)}")
 
+    before_dsm = args.before_dsm if args.before_dsm and args.before_dsm.exists() else None
+    after_dsm = args.after_dsm if args.after_dsm and args.after_dsm.exists() else None
+    compute_volume = bool(args.compute_volume and before_dsm and after_dsm)
+    if args.compute_volume and not compute_volume:
+        print(
+            "Warning: --compute-volume requested but DSM missing; "
+            f"before={args.before_dsm} after={args.after_dsm}"
+        )
+
     build_dataset(
         before=before,
         after=after,
@@ -233,9 +263,9 @@ def main():
         candidate_radius=args.candidate_radius,
         candidate_min_score=args.candidate_min_score,
         dedupe=not args.no_dedupe,
-        before_dsm=args.before_dsm,
-        after_dsm=args.after_dsm,
-        compute_volume=args.compute_volume,
+        before_dsm=before_dsm,
+        after_dsm=after_dsm,
+        compute_volume=compute_volume,
         source_meta=source,
     )
 

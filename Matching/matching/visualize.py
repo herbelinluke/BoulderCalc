@@ -66,75 +66,129 @@ def load_inputs(
     return before, after
 
 
-def _window_rgb(path: str | Path, bounds, max_size: int = 800) -> tuple[np.ndarray, tuple]:
-    """Return (H,W,3) uint8 preview and extent (left, right, bottom, top)."""
-    if rasterio is None:
-        raise RuntimeError("rasterio is required for ortho/DSM previews")
+class OrthoPreview:
+    """Keep full orthomosaic DatasetReaders open; window by map bounds.
 
-    with rasterio.open(path) as src:
-        left, bottom, right, top = bounds
-        window = from_bounds(left, bottom, right, top, transform=src.transform)
-        window = window.round_offsets().round_lengths()
-        if window.width <= 0 or window.height <= 0:
-            raise ValueError("empty window")
+    Prefer this over inference tiles — tile edges / wrong-tile picks cause
+    black panels (boundless fill). Rasterio uses overviews so this stays fast.
+    """
 
-        scale = max(window.width, window.height) / max_size
-        if scale < 1:
-            scale = 1.0
-        out_h = max(1, int(window.height / scale))
-        out_w = max(1, int(window.width / scale))
+    def __init__(
+        self,
+        before_path: Path | str | None = None,
+        after_path: Path | str | None = None,
+    ):
+        self.before_path = Path(before_path) if before_path else None
+        self.after_path = Path(after_path) if after_path else None
+        self._before = None
+        self._after = None
+        if rasterio is None:
+            return
+        if self.before_path and self.before_path.exists():
+            self._before = rasterio.open(self.before_path)
+            print(f"Opened before ortho: {self.before_path}")
+        if self.after_path and self.after_path.exists():
+            self._after = rasterio.open(self.after_path)
+            print(f"Opened after ortho: {self.after_path}")
 
-        count = min(3, src.count)
-        data = src.read(
-            indexes=list(range(1, count + 1)),
-            window=window,
-            out_shape=(count, out_h, out_w),
-            resampling=Resampling.bilinear,
-            boundless=True,
-            fill_value=0,
-        )
-        transform = src.window_transform(window)
-        # Adjust transform for downsampling
-        transform = transform * transform.scale(
-            window.width / out_w, window.height / out_h
-        )
-        extent = (
-            transform.c,
-            transform.c + transform.a * out_w,
-            transform.f + transform.e * out_h,
-            transform.f,
-        )
+    @property
+    def ready(self) -> bool:
+        return self._before is not None or self._after is not None
 
-        if count == 1:
-            band = data[0].astype(np.float32)
-            # DSM / single-band stretch
-            valid = band[np.isfinite(band) & (band != 0)]
+    def close(self) -> None:
+        for ds in (self._before, self._after):
+            if ds is not None:
+                try:
+                    ds.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._before = self._after = None
+
+    def window(self, which: str, bounds, max_size: int = 1200):
+        ds = self._before if which == "before" else self._after
+        if ds is None or bounds is None:
+            return None
+        return _window_rgb_dataset(ds, bounds, max_size=max_size)
+
+
+def _window_rgb_dataset(src, bounds, max_size: int = 1200) -> tuple[np.ndarray, tuple]:
+    """Crop an open dataset to bounds → (H,W,3) uint8 + extent.
+
+    Clamps to the raster footprint (no boundless black padding).
+    """
+    from rasterio.windows import Window
+
+    left, bottom, right, top = bounds
+    window = from_bounds(left, bottom, right, top, transform=src.transform)
+    window = window.round_offsets().round_lengths()
+    row_off = max(0, int(window.row_off))
+    col_off = max(0, int(window.col_off))
+    row_end = min(src.height, int(window.row_off + window.height))
+    col_end = min(src.width, int(window.col_off + window.width))
+    height = row_end - row_off
+    width = col_end - col_off
+    if height <= 0 or width <= 0:
+        raise ValueError("requested window is outside the raster")
+    window = Window(col_off, row_off, width, height)
+
+    scale = max(window.width, window.height) / max_size
+    if scale < 1:
+        scale = 1.0
+    out_h = max(1, int(window.height / scale))
+    out_w = max(1, int(window.width / scale))
+
+    count = min(3, src.count)
+    data = src.read(
+        indexes=list(range(1, count + 1)),
+        window=window,
+        out_shape=(count, out_h, out_w),
+        resampling=Resampling.bilinear,
+        boundless=False,
+    )
+    transform = src.window_transform(window)
+    transform = transform * transform.scale(window.width / out_w, window.height / out_h)
+    extent = (
+        transform.c,
+        transform.c + transform.a * out_w,
+        transform.f + transform.e * out_h,
+        transform.f,
+    )
+
+    if count == 1:
+        band = data[0].astype(np.float32)
+        valid = band[np.isfinite(band) & (band != 0)]
+        if valid.size:
+            lo, hi = np.percentile(valid, [2, 98])
+            if hi <= lo:
+                hi = lo + 1
+            band = np.clip((band - lo) / (hi - lo), 0, 1)
+        else:
+            band = np.zeros_like(band)
+        rgb = (np.stack([band, band, band], axis=-1) * 255).astype(np.uint8)
+    else:
+        rgb = np.transpose(data, (1, 2, 0)).astype(np.float32)
+        for i in range(rgb.shape[2]):
+            band = rgb[:, :, i]
+            valid = band[band > 0]
             if valid.size:
                 lo, hi = np.percentile(valid, [2, 98])
                 if hi <= lo:
                     hi = lo + 1
-                band = np.clip((band - lo) / (hi - lo), 0, 1)
+                rgb[:, :, i] = np.clip((band - lo) / (hi - lo), 0, 1)
             else:
-                band = np.zeros_like(band)
-            rgb = np.stack([band, band, band], axis=-1)
-            rgb = (rgb * 255).astype(np.uint8)
-        else:
-            rgb = np.transpose(data, (1, 2, 0)).astype(np.float32)
-            for i in range(rgb.shape[2]):
-                band = rgb[:, :, i]
-                valid = band[band > 0]
-                if valid.size:
-                    lo, hi = np.percentile(valid, [2, 98])
-                    if hi <= lo:
-                        hi = lo + 1
-                    rgb[:, :, i] = np.clip((band - lo) / (hi - lo), 0, 1)
-                else:
-                    rgb[:, :, i] = 0
-            if rgb.shape[2] == 2:
-                rgb = np.concatenate([rgb, rgb[:, :, :1]], axis=2)
-            rgb = (rgb * 255).astype(np.uint8)
+                rgb[:, :, i] = 0
+        if rgb.shape[2] == 2:
+            rgb = np.concatenate([rgb, rgb[:, :, :1]], axis=2)
+        rgb = (rgb * 255).astype(np.uint8)
+    return rgb, extent
 
-        return rgb, extent
+
+def _window_rgb(path: str | Path, bounds, max_size: int = 1200) -> tuple[np.ndarray, tuple]:
+    """Return (H,W,3) uint8 preview and extent (left, right, bottom, top)."""
+    if rasterio is None:
+        raise RuntimeError("rasterio is required for ortho/DSM previews")
+    with rasterio.open(path) as src:
+        return _window_rgb_dataset(src, bounds, max_size=max_size)
 
 
 def plot_overview(results: dict[str, gpd.GeoDataFrame], ax=None, title: str | None = None):
@@ -271,19 +325,35 @@ def _draw_panel(
     ax,
     raster: Path | None,
     geom,
-    bounds,
+    crop_bounds,
     edgecolor: str,
     title: str,
     before_geom=None,
     after_geom=None,
     draw_vector: bool = False,
+    ortho: OrthoPreview | None = None,
+    ortho_which: str | None = None,
+    view_bounds=None,
 ):
+    """Draw one side panel.
+
+    ``crop_bounds`` is the raster window (large, for panning).
+    ``view_bounds`` is the initial axis zoom (tighter around the boulder).
+    """
     shown = False
-    if raster and Path(raster).exists() and bounds is not None:
+    bounds_for_view = view_bounds or crop_bounds
+    if crop_bounds is not None:
         try:
-            rgb, extent = _window_rgb(raster, bounds)
-            ax.imshow(rgb, extent=extent, origin="upper")
-            shown = True
+            if ortho is not None and ortho_which is not None and ortho.ready:
+                got = ortho.window(ortho_which, crop_bounds)
+                if got is not None:
+                    rgb, extent = got
+                    ax.imshow(rgb, extent=extent, origin="upper")
+                    shown = True
+            elif raster and Path(raster).exists():
+                rgb, extent = _window_rgb(raster, crop_bounds)
+                ax.imshow(rgb, extent=extent, origin="upper")
+                shown = True
         except Exception as exc:  # noqa: BLE001
             ax.text(
                 0.02,
@@ -311,9 +381,9 @@ def _draw_panel(
     if draw_vector:
         _draw_displacement_vector(ax, before_geom, after_geom)
 
-    if bounds is not None:
-        ax.set_xlim(bounds[0], bounds[2])
-        ax.set_ylim(bounds[1], bounds[3])
+    if bounds_for_view is not None:
+        ax.set_xlim(bounds_for_view[0], bounds_for_view[2])
+        ax.set_ylim(bounds_for_view[1], bounds_for_view[3])
     ax.set_aspect("equal")
     ax.set_title(title)
 
@@ -324,18 +394,29 @@ def plot_match_detail(
     after: gpd.GeoDataFrame | None,
     before_raster: Path | None = None,
     after_raster: Path | None = None,
-    pad_m: float = 8.0,
+    pad_m: float = 12.0,
     ax=None,
     side_by_side: bool = True,
     pair_tiles: list[tuple[str, str]] | None = None,
     axes=None,
     draw_vector: bool = True,
+    ortho: OrthoPreview | None = None,
+    raster_pad_m: float | None = None,
 ):
-    """Plot one match. Default is side-by-side 2024 | 2025 panels."""
+    """Plot one match. Default is side-by-side 2024 | 2025 panels.
+
+    ``pad_m`` controls the initial zoom. ``raster_pad_m`` (default ~3× pad)
+    controls how much ortho is loaded so you can pan/zoom with the toolbar.
+    """
     before_geom, after_geom = _match_pair_geoms(match_row, before, after)
-    bounds = _match_bounds(before_geom, after_geom, pad_m)
+    view_bounds = _match_bounds(before_geom, after_geom, pad_m)
+    crop_pad = raster_pad_m if raster_pad_m is not None else max(pad_m * 3.0, pad_m + 25.0)
+    crop_bounds = _match_bounds(before_geom, after_geom, crop_pad)
+
+    # Prefer full orthos; only use inference tiles when orthos are unavailable
+    use_tiles = pair_tiles if (ortho is None or not ortho.ready) else None
     before_raster, after_raster = _pick_pair_rasters(
-        bounds, before_raster, after_raster, pair_tiles
+        crop_bounds, before_raster, after_raster, use_tiles
     )
 
     score = match_row.get("match_score", np.nan)
@@ -346,6 +427,7 @@ def plot_match_detail(
     )
 
     if side_by_side:
+        owned_figure = axes is None
         if axes is None:
             fig, axes = plt.subplots(1, 2, figsize=(12, 6))
         else:
@@ -354,42 +436,78 @@ def plot_match_detail(
             axes[0],
             before_raster,
             before_geom,
-            bounds,
+            crop_bounds,
             COLORS["before"],
             "2024 (before)",
             before_geom=before_geom,
             after_geom=after_geom,
             draw_vector=draw_vector,
+            ortho=ortho,
+            ortho_which="before",
+            view_bounds=view_bounds,
         )
         _draw_panel(
             axes[1],
             after_raster,
             after_geom,
-            bounds,
+            crop_bounds,
             COLORS["after"],
             "2025 (after)",
             before_geom=before_geom,
             after_geom=after_geom,
             draw_vector=draw_vector,
+            ortho=ortho,
+            ortho_which="after",
+            view_bounds=view_bounds,
         )
-        fig.suptitle(subtitle, fontsize=11)
+        # Only set a figure-level title when we own the figure. Callers that
+        # pass ``axes`` (e.g. eval GUI) already have overview/status chrome;
+        # a shared suptitle steals vertical space and clips panel titles.
+        if owned_figure:
+            fig.suptitle(subtitle, fontsize=11)
         return axes
 
     # Legacy single-panel overlay
     ax = ax or plt.gca()
-    if bounds is None:
+    if crop_bounds is None:
         ax.set_title("No geometry")
         return ax
     shown = False
-    for raster in (after_raster, before_raster):
-        if raster and Path(raster).exists():
+    if ortho is not None and ortho.ready:
+        for which in ("after", "before"):
             try:
-                rgb, extent = _window_rgb(raster, bounds)
-                ax.imshow(rgb, extent=extent, origin="upper")
-                shown = True
-                break
+                got = ortho.window(which, crop_bounds)
+                if got is not None:
+                    rgb, extent = got
+                    ax.imshow(rgb, extent=extent, origin="upper")
+                    shown = True
+                    break
             except Exception as exc:  # noqa: BLE001
-                ax.text(0.02, 0.02, f"raster preview failed: {exc}", transform=ax.transAxes, fontsize=7, color="red")
+                ax.text(
+                    0.02,
+                    0.02,
+                    f"raster preview failed: {exc}",
+                    transform=ax.transAxes,
+                    fontsize=7,
+                    color="red",
+                )
+    if not shown:
+        for raster in (after_raster, before_raster):
+            if raster and Path(raster).exists():
+                try:
+                    rgb, extent = _window_rgb(raster, crop_bounds)
+                    ax.imshow(rgb, extent=extent, origin="upper")
+                    shown = True
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    ax.text(
+                        0.02,
+                        0.02,
+                        f"raster preview failed: {exc}",
+                        transform=ax.transAxes,
+                        fontsize=7,
+                        color="red",
+                    )
     if not shown:
         ax.set_facecolor("#1a1a1a")
     if before_geom is not None:
@@ -402,8 +520,9 @@ def plot_match_detail(
         )
     if draw_vector:
         _draw_displacement_vector(ax, before_geom, after_geom)
-    ax.set_xlim(bounds[0], bounds[2])
-    ax.set_ylim(bounds[1], bounds[3])
+    vb = view_bounds or crop_bounds
+    ax.set_xlim(vb[0], vb[2])
+    ax.set_ylim(vb[1], vb[3])
     ax.set_aspect("equal")
     ax.set_title(subtitle)
     return ax

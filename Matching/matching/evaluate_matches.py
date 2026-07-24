@@ -51,6 +51,7 @@ from shapely.validation import make_valid
 
 from .visualize import (
     COLORS,
+    OrthoPreview,
     _draw_displacement_vector,
     _match_pair_geoms,
     load_inputs,
@@ -241,6 +242,19 @@ def _maybe_float(v):
     return f
 
 
+def _row_get(row, key, default=None):
+    """Safe field access for pandas Series / mapping rows."""
+    try:
+        if hasattr(row, "index") and key in row.index:
+            return row[key]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        return row.get(key, default)
+    except Exception:  # noqa: BLE001
+        return default
+
+
 def build_pair_record(
     match_row,
     before_geom,
@@ -303,18 +317,14 @@ def build_pair_record(
         "source_queue": source_queue,
         "note": note,
         "labeled_at": _utc_now() if label else None,
-        "match_score": float(match_row.get("match_score", np.nan)),
-        "distance_m": float(match_row.get("distance_m", np.nan)),
-        "dx": float(match_row.get("dx", np.nan)) if match_row.get("dx") is not None else None,
-        "dy": float(match_row.get("dy", np.nan)) if match_row.get("dy") is not None else None,
-        "before_area": float(match_row.get("before_area", np.nan))
-        if match_row.get("before_area") is not None
-        else None,
-        "after_area": float(match_row.get("after_area", np.nan))
-        if match_row.get("after_area") is not None
-        else None,
-        "before_volume": _maybe_float(match_row.get("before_volume")),
-        "after_volume": _maybe_float(match_row.get("after_volume")),
+        "match_score": float(_row_get(match_row, "match_score", np.nan)),
+        "distance_m": float(_row_get(match_row, "distance_m", np.nan)),
+        "dx": _maybe_float(_row_get(match_row, "dx")),
+        "dy": _maybe_float(_row_get(match_row, "dy")),
+        "before_area": _maybe_float(_row_get(match_row, "before_area")),
+        "after_area": _maybe_float(_row_get(match_row, "after_area")),
+        "before_volume": _maybe_float(_row_get(match_row, "before_volume")),
+        "after_volume": _maybe_float(_row_get(match_row, "after_volume")),
         "before": before_rec,
         "after": after_rec,
         "pair_bbox": bbox,
@@ -449,6 +459,139 @@ def _export_qgis_geojson(db: dict, path: Path) -> None:
     print(f"Wrote QGIS layer {path}")
 
 
+def _volumes_mostly_missing(gdf: gpd.GeoDataFrame | None, cols: tuple[str, ...]) -> bool:
+    """True when every listed volume column is absent or all-null/non-finite."""
+    if gdf is None or gdf.empty:
+        return False
+    saw = False
+    for col in cols:
+        if col not in gdf.columns:
+            continue
+        saw = True
+        vals = gdf[col]
+        finite = vals.notna() & np.isfinite(vals.astype(float))
+        if bool(finite.any()):
+            return False
+    return saw or True
+
+
+def _write_geojson(gdf: gpd.GeoDataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if gdf is None or gdf.empty:
+        gpd.GeoDataFrame({"geometry": []}, crs="EPSG:25829").to_file(path, driver="GeoJSON")
+    else:
+        gdf.to_file(path, driver="GeoJSON")
+
+
+def enrich_pair_volumes(
+    before: gpd.GeoDataFrame | None,
+    after: gpd.GeoDataFrame | None,
+    matches: gpd.GeoDataFrame,
+    missed: gpd.GeoDataFrame,
+    before_dsm: Path,
+    after_dsm: Path,
+    *,
+    appeared: gpd.GeoDataFrame | None = None,
+    disappeared: gpd.GeoDataFrame | None = None,
+    persist_dir: Path | None = None,
+) -> tuple[gpd.GeoDataFrame | None, gpd.GeoDataFrame | None, gpd.GeoDataFrame, gpd.GeoDataFrame]:
+    """Compute DSM volumes on before/after polygons and map onto match rows.
+
+    Manual july14 datasets were often built without ``--compute-volume``, so
+    ``before_volume`` / ``after_volume`` are all null. This fills them in-place
+    for the eval UI and optionally rewrites prediction/result GeoJSONs.
+    """
+    from .attributes import estimate_volume_from_dsm_progress
+
+    if before is None or after is None or before.empty or after.empty:
+        print("Warning: cannot enrich volumes — missing before/after polygons")
+        return before, after, matches, missed
+
+    before = before.copy().reset_index(drop=True)
+    after = after.copy().reset_index(drop=True)
+    before["before_id"] = before.index.astype(int)
+    after["after_id"] = after.index.astype(int)
+
+    need_b: set[int] = set()
+    need_a: set[int] = set()
+    for gdf in (matches, missed):
+        if gdf is None or gdf.empty:
+            continue
+        need_b.update(int(x) for x in gdf["before_id"].tolist())
+        need_a.update(int(x) for x in gdf["after_id"].tolist())
+
+    if not need_b and not need_a:
+        print("No match/missed IDs to volume-enrich")
+        return before, after, matches, missed
+
+    before_sub = before[before["before_id"].isin(need_b)].copy()
+    after_sub = after[after["after_id"].isin(need_a)].copy()
+    print(
+        f"Volume fill for {len(before_sub)} before + {len(after_sub)} after "
+        f"polygons referenced by matches/missed "
+        f"(of {len(before)}/{len(after)} total)"
+    )
+
+    before_sub = estimate_volume_from_dsm_progress(before_sub, before_dsm, label="2024")
+    after_sub = estimate_volume_from_dsm_progress(after_sub, after_dsm, label="2025")
+
+    if "volume" not in before.columns:
+        before["volume"] = np.nan
+    if "volume" not in after.columns:
+        after["volume"] = np.nan
+    before.loc[before_sub.index, "volume"] = before_sub["volume"].to_numpy()
+    after.loc[after_sub.index, "volume"] = after_sub["volume"].to_numpy()
+    # height diagnostics when present
+    for col in ("mean_height", "max_height"):
+        if col in before_sub.columns:
+            if col not in before.columns:
+                before[col] = np.nan
+            before.loc[before_sub.index, col] = before_sub[col].to_numpy()
+        if col in after_sub.columns:
+            if col not in after.columns:
+                after[col] = np.nan
+            after.loc[after_sub.index, col] = after_sub[col].to_numpy()
+
+    vol_b = before.set_index("before_id")["volume"]
+    vol_a = after.set_index("after_id")["volume"]
+
+    def _map_pair_vols(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        if gdf is None or gdf.empty:
+            return gdf
+        out = gdf.copy()
+        out["before_volume"] = out["before_id"].map(vol_b)
+        out["after_volume"] = out["after_id"].map(vol_a)
+        return out
+
+    matches = _map_pair_vols(matches)
+    missed = _map_pair_vols(missed)
+
+    if appeared is not None and not appeared.empty and "after_id" in appeared.columns:
+        appeared = appeared.copy()
+        appeared["volume"] = appeared["after_id"].map(vol_a)
+    if disappeared is not None and not disappeared.empty and "before_id" in disappeared.columns:
+        disappeared = disappeared.copy()
+        disappeared["volume"] = disappeared["before_id"].map(vol_b)
+
+    if persist_dir is not None:
+        pred = persist_dir / "predictions"
+        res = persist_dir / "results"
+        _write_geojson(before, pred / "before_inferred_boulders.geojson")
+        _write_geojson(after, pred / "after_inferred_boulders.geojson")
+        _write_geojson(matches, res / "matched_boulders.geojson")
+        if missed is not None and not missed.empty:
+            from .candidates import write_missed_candidates
+
+            write_missed_candidates(missed, res / "missed_candidates.geojson")
+        if appeared is not None:
+            _write_geojson(appeared, res / "appeared_boulders.geojson")
+        if disappeared is not None:
+            _write_geojson(disappeared, res / "disappeared_boulders.geojson")
+        print(f"Persisted DSM volumes under {persist_dir}")
+
+    return before, after, matches, missed
+
+
 def _ensure_ids(gdf: gpd.GeoDataFrame | None, col: str) -> gpd.GeoDataFrame | None:
     if gdf is None:
         return None
@@ -481,10 +624,12 @@ def run_eval_gui(
     after_raster: Path | None = None,
     pair_tiles: list[tuple[str, str]] | None = None,
     missed_candidates: gpd.GeoDataFrame | None = None,
-    pad_m: float = 8.0,
+    pad_m: float = 12.0,
     overview_pad_m: float = 25.0,
     meta: dict | None = None,
     min_iou: float = 0.05,
+    ortho: OrthoPreview | None = None,
+    raster_pad_m: float = 40.0,
 ):
     matches = results["matches"].sort_values("match_score", ascending=False).reset_index(drop=True)
     missed = (
@@ -580,20 +725,22 @@ def run_eval_gui(
         "dirty": False,
     }
 
-    fig = plt.figure(figsize=(17, 8))
+    fig = plt.figure(figsize=(17, 9))
+    # Leave room for panel titles (volumes) at top and a multi-line status band.
+    fig.subplots_adjust(left=0.04, right=0.99, top=0.90, bottom=0.18, wspace=0.18)
     ax_overview = fig.add_subplot(1, 3, 1)
     ax_before = fig.add_subplot(1, 3, 2)
     ax_after = fig.add_subplot(1, 3, 3)
     detail_axes = [ax_before, ax_after]
     fig.canvas.manager.set_window_title("Matcher evaluation — label matches")
 
-    status_ax = fig.add_axes([0.02, 0.01, 0.96, 0.07])
+    status_ax = fig.add_axes([0.02, 0.01, 0.96, 0.14])
     status_ax.set_axis_off()
     status_text = status_ax.text(
         0.0,
-        0.5,
+        1.0,
         "",
-        va="center",
+        va="top",
         ha="left",
         family="monospace",
         fontsize=9,
@@ -666,22 +813,24 @@ def run_eval_gui(
         f24 = ",".join(str(f) for f in m24.get("fids", [])[:6]) or "-"
         f25 = ",".join(str(f) for f in m25.get("fids", [])[:6]) or "-"
         mode_name = "MISSED CANDIDATES" if state["mode"] == "missed" else "MATCHER MATCHES"
+        # Keep volumes on line 1 — status band is short and lower lines clip easily.
         return (
             f"MODE={mode_name}  [{state['idx']+1}/{_queue_len()}]  {rec['label_id']}  "
-            f"LABEL={lab}  flags={_flag_summary(rec)}  scored={n_done}/{_queue_len()}  "
+            f"LABEL={lab}  flags={_flag_summary(rec)}  "
+            f"vol24={_fmt_vol(rec.get('before_volume'))}  "
+            f"vol25={_fmt_vol(rec.get('after_volume'))}  "
             f"score={rec.get('match_score', float('nan')):.3f}  "
-            f"dist={rec.get('distance_m', float('nan')):.2f}m\n"
-            f"vol before={_fmt_vol(rec.get('before_volume'))}  "
-            f"after={_fmt_vol(rec.get('after_volume'))}   "
-            f"before centroid: {b.get('centroid_x', float('nan')):.3f}, "
+            f"dist={rec.get('distance_m', float('nan')):.2f}m  "
+            f"scored={n_done}/{_queue_len()}\n"
+            f"centroids 24: {b.get('centroid_x', float('nan')):.3f}, "
             f"{b.get('centroid_y', float('nan')):.3f}   "
-            f"after: {a.get('centroid_x', float('nan')):.3f}, "
-            f"{a.get('centroid_y', float('nan')):.3f}\n"
-            f"QGIS extent: {rec.get('qgis_extent')}\n"
+            f"25: {a.get('centroid_x', float('nan')):.3f}, "
+            f"{a.get('centroid_y', float('nan')):.3f}   "
+            f"QGIS: {rec.get('qgis_extent')}\n"
             f"manual24 intersect={m24.get('intersects')} fids=[{f24}] iou={m24.get('best_iou')}   "
             f"manual25 intersect={m25.get('intersects')} fids=[{f25}] iou={m25.get('best_iou')}\n"
             f"keys: y=confirm  x=not-match  ?=unsure  b=boulder  z=not-boulder  d=deposit  "
-            f"i=isolated  m=mode  Bksp=clear label  j=next unlabeled  c=print  s=save  n/p  o  q"
+            f"i=isolated  m=mode  Bksp=clear  j=next unlabeled  c=print  s=save  n/p  o  q"
         )
 
     def _apply_overview_zoom(row):
@@ -738,13 +887,35 @@ def run_eval_gui(
             pair_tiles=pair_tiles,
             axes=detail_axes,
             draw_vector=True,
+            ortho=ortho,
+            raster_pad_m=raster_pad_m,
         )
-        detail_axes[0].set_title(
-            f"2024 (before)  vol={_fmt_vol(rec.get('before_volume'))}"
+        vol24 = _fmt_vol(rec.get("before_volume"))
+        vol25 = _fmt_vol(rec.get("after_volume"))
+        score = rec.get("match_score", float("nan"))
+        dist = rec.get("distance_m", float("nan"))
+        fig.suptitle(
+            f"{rec.get('label_id', '')}   score={score:.3f}   dist={dist:.2f}m   "
+            f"[{state['idx'] + 1}/{_queue_len()}]",
+            fontsize=12,
+            y=0.98,
         )
-        detail_axes[1].set_title(
-            f"2025 (after)  vol={_fmt_vol(rec.get('after_volume'))}"
-        )
+        detail_axes[0].set_title(f"2024 (before)  vol={vol24}", fontsize=11)
+        detail_axes[1].set_title(f"2025 (after)  vol={vol25}", fontsize=11)
+        # Also stamp volumes on the image so they stay visible if titles clip.
+        for ax, vol in ((detail_axes[0], vol24), (detail_axes[1], vol25)):
+            ax.text(
+                0.02,
+                0.98,
+                f"V={vol}",
+                transform=ax.transAxes,
+                va="top",
+                ha="left",
+                fontsize=10,
+                color="white",
+                bbox=dict(boxstyle="round,pad=0.25", facecolor="black", alpha=0.55, edgecolor="none"),
+                zorder=20,
+            )
 
         bounds = None
         if before_geom is not None or after_geom is not None:
@@ -789,10 +960,6 @@ def run_eval_gui(
                         zorder=4,
                     )
 
-        detail_axes[1].set_xlabel(
-            f"{state['mode'].capitalize()} {state['idx'] + 1}/{_queue_len()}  |  "
-            f"y confirm · x reject · ? unsure · b/z/d/i flags · m toggle queue"
-        )
         status_text.set_text(_status_lines(row, rec))
         if lab in LABEL_COLORS:
             status_text.set_color(LABEL_COLORS[lab])
@@ -991,14 +1158,21 @@ def run_eval_gui(
     fig.canvas.mpl_connect("key_press_event", on_key)
     _goto_next_unlabeled(prefer_advance=False)
     missed_note = f", {len(missed)} missed candidates (m toggles)" if not missed.empty else ""
-    print(
-        f"Evaluating {len(matches)} matcher matches{missed_note} → {labels_path}\n"
-        "y=confirm  x=not-match  ?=unsure  b/z/d/i=flags  m=queue  j=next unlabeled  "
-        "c=print  s=save  q=save+quit"
+    ortho_note = (
+        " [full orthos]" if ortho is not None and ortho.ready else " [tile/fallback rasters]"
     )
-    plt.show()
-    if state["dirty"]:
-        do_save()
+    print(
+        f"Evaluating {len(matches)} matcher matches{missed_note} → {labels_path}{ortho_note}\n"
+        "y=confirm  x=not-match  ?=unsure  b/z/d/i=flags  m=queue  j=next unlabeled  "
+        "c=print  s=save  q=save+quit  (pan/zoom toolbar on larger ortho crop)"
+    )
+    try:
+        plt.show()
+    finally:
+        if state["dirty"]:
+            do_save()
+        if ortho is not None:
+            ortho.close()
 
 
 def _load_missed_candidates(
@@ -1067,13 +1241,63 @@ def main():
     parser.add_argument("--ann-24", type=Path, default=default_ann24)
     parser.add_argument("--ann-25", type=Path, default=default_ann25)
     parser.add_argument("--no-ann", action="store_true", help="Skip manual annotation intersect checks")
-    parser.add_argument("--pad-m", type=float, default=8.0)
+    parser.add_argument("--pad-m", type=float, default=12.0, help="Initial view pad around boulder (m)")
+    parser.add_argument(
+        "--raster-pad-m",
+        type=float,
+        default=40.0,
+        help="Ortho crop pad (m); larger than --pad-m so you can pan in the UI",
+    )
     parser.add_argument("--min-iou", type=float, default=0.05, help="Min IoU to list an ann fid")
     parser.add_argument(
         "--candidate-radius",
         type=float,
         default=25.0,
         help="Radius (m) for on-the-fly missed-candidate pairing when geojson is missing",
+    )
+    parser.add_argument(
+        "--before-ortho",
+        type=Path,
+        default=root / "2024" / "Sites1and2_2024_Orthomosaic.tif",
+        help="Full 2024 orthomosaic (preferred over inference tiles)",
+    )
+    parser.add_argument(
+        "--after-ortho",
+        type=Path,
+        default=root / "2025" / "25IniSouthOrt.tif",
+        help="Full 2025 orthomosaic (preferred over inference tiles)",
+    )
+    parser.add_argument(
+        "--use-tiles",
+        action="store_true",
+        help="Force inference-tile previews instead of full orthos",
+    )
+    parser.add_argument(
+        "--before-dsm",
+        type=Path,
+        default=root / "2024" / "Sites1and2_2024_DSM_30mm.tif",
+        help="2024 DSM used to fill missing volumes",
+    )
+    parser.add_argument(
+        "--after-dsm",
+        type=Path,
+        default=root / "2025" / "25IniSouthDSM.tif",
+        help="2025 DSM used to fill missing volumes",
+    )
+    parser.add_argument(
+        "--compute-volume",
+        action="store_true",
+        help="Force DSM volume computation even if some volumes already exist",
+    )
+    parser.add_argument(
+        "--no-volume",
+        action="store_true",
+        help="Skip DSM volume fill (leave — when volumes were never computed)",
+    )
+    parser.add_argument(
+        "--no-persist-volumes",
+        action="store_true",
+        help="Compute volumes in-memory only (do not rewrite GeoJSONs under --outdir)",
     )
     args = parser.parse_args()
 
@@ -1091,6 +1315,38 @@ def main():
     before, after = load_inputs(before_path, after_path)
     missed = _load_missed_candidates(results, results_dir, args.candidate_radius)
 
+    volumes_missing = _volumes_mostly_missing(
+        results.get("matches"), ("before_volume", "after_volume")
+    )
+    if args.no_volume:
+        if volumes_missing:
+            print("Volumes missing; skipping DSM fill (--no-volume).")
+    elif volumes_missing or args.compute_volume:
+        if not args.before_dsm.exists() or not args.after_dsm.exists():
+            print(
+                "Warning: volumes are missing but DSM(s) not found:\n"
+                f"  before: {args.before_dsm} exists={args.before_dsm.exists()}\n"
+                f"  after:  {args.after_dsm} exists={args.after_dsm.exists()}\n"
+                "Pass --before-dsm / --after-dsm, or rebuild with "
+                "build_gt_dataset --compute-volume."
+            )
+        else:
+            reason = "forced" if args.compute_volume and not volumes_missing else "missing on match rows"
+            print(f"Filling DSM volumes ({reason}) …")
+            before, after, matches, missed = enrich_pair_volumes(
+                before,
+                after,
+                results["matches"],
+                missed,
+                args.before_dsm,
+                args.after_dsm,
+                appeared=results.get("appeared"),
+                disappeared=results.get("disappeared"),
+                persist_dir=None if args.no_persist_volumes else outdir,
+            )
+            results["matches"] = matches
+            results["missed_candidates"] = missed
+
     pair_tiles = None
     before_raster = after_raster = None
     if summary_path.exists():
@@ -1100,6 +1356,23 @@ def main():
             pair_tiles = [(t["tile_24"], t["tile_25"]) for t in tiles]
             before_raster = Path(tiles[0]["tile_24"])
             after_raster = Path(tiles[0]["tile_25"])
+
+    ortho = None
+    if not args.use_tiles:
+        ortho = OrthoPreview(args.before_ortho, args.after_ortho)
+        if ortho.ready:
+            # Prefer full orthos — disable tile picking (tile edges → black)
+            pair_tiles = None
+            before_raster = args.before_ortho if args.before_ortho.exists() else before_raster
+            after_raster = args.after_ortho if args.after_ortho.exists() else after_raster
+        else:
+            print(
+                "Warning: full orthos not opened; falling back to inference tiles. "
+                "Check --before-ortho / --after-ortho paths."
+            )
+            ortho = None
+    else:
+        print("Using inference tiles for previews (--use-tiles).")
 
     ann24 = ann25 = None
     if not args.no_ann:
@@ -1123,6 +1396,10 @@ def main():
         "crs": "EPSG:25829",
         "min_iou_for_fid": args.min_iou,
         "candidate_radius": args.candidate_radius,
+        "before_ortho": str(args.before_ortho) if args.before_ortho else None,
+        "after_ortho": str(args.after_ortho) if args.after_ortho else None,
+        "before_dsm": str(args.before_dsm) if args.before_dsm else None,
+        "after_dsm": str(args.after_dsm) if args.after_dsm else None,
     }
 
     run_eval_gui(
@@ -1139,6 +1416,8 @@ def main():
         pad_m=args.pad_m,
         meta=meta,
         min_iou=args.min_iou,
+        ortho=ortho,
+        raster_pad_m=args.raster_pad_m,
     )
 
 

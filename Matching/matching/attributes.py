@@ -109,3 +109,35 @@ def estimate_volume_from_dsm(gdf, dsm_path, buffer_distance=0.5):
     gdf["max_height"] = max_heights
 
     return gdf
+
+
+def estimate_volume_from_dsm_progress(
+    gdf, dsm_path, buffer_distance=0.5, chunk=50, label: str = ""
+):
+    """Like ``estimate_volume_from_dsm`` but prints progress for large layers."""
+    import geopandas as gpd
+    import pandas as pd
+
+    if gdf is None or gdf.empty:
+        return gdf
+    n = len(gdf)
+    tag = f"{label} " if label else ""
+    print(f"Computing {tag}DSM volumes for {n} polygons …")
+    pieces = []
+    for start in range(0, n, chunk):
+        stop = min(start + chunk, n)
+        pieces.append(
+            estimate_volume_from_dsm(
+                gdf.iloc[start:stop],
+                dsm_path,
+                buffer_distance=buffer_distance,
+            )
+        )
+        print(f"  {tag}{stop}/{n}", flush=True)
+    out = pd.concat(pieces, axis=0)
+    # Preserve original row index so callers can ``.loc``-update the parent frame.
+    out.index = gdf.index
+    out = gpd.GeoDataFrame(out, crs=gdf.crs)
+    ok = int(np.isfinite(out["volume"].astype(float)).sum())
+    print(f"  {tag}done — {ok}/{n} finite volumes")
+    return out
