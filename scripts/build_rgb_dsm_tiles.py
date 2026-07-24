@@ -150,9 +150,17 @@ def parse_tile_keys(value: str, year: int) -> list[str]:
 
 
 def keys_from_coco(coco_dir: Path, year: int) -> list[str]:
-    """Derive RR_CC keys from COCO image file_names for the given year."""
+    """Derive RR_CC keys from COCO image file_names for the given year.
+
+    Accepts both raw ortho names and gpkg_to_coco year-prefixed copies, e.g.:
+      25IniSouthOrt_04_34.tif
+      25_25IniSouthOrt_04_34.tif
+      Sites1and2_2024_Orthomosaic_11_07.tif
+      24_Sites1and2_2024_Orthomosaic_11_07.tif
+    """
     keys: list[str] = []
     seen: set[str] = set()
+    year_prefix = f"{year}_"
     for ann_name in (
         "train_annotations.json",
         "validation_annotations.json",
@@ -161,11 +169,13 @@ def keys_from_coco(coco_dir: Path, year: int) -> list[str]:
         path = coco_dir / ann_name
         if not path.exists():
             continue
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         for image in data["images"]:
             name = image["file_name"]
-            # Accept 25IniSouthOrt_04_34.tif or 24_Sites1and2_..._11_07.tif
             stem = Path(name).stem
+            # COCO RGB copies are named ``{year}_{ortho_basename}``.
+            if stem.startswith(year_prefix):
+                stem = stem[len(year_prefix) :]
             parts = stem.split("_")
             if year == 25 and stem.startswith("25IniSouthOrt_") and len(parts) >= 3:
                 key = f"{int(parts[-2])}_{int(parts[-1])}"
