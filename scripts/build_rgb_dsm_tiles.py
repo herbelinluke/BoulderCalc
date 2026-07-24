@@ -33,6 +33,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gpkg_to_coco import TILES_24, TILES_25, resolve_tile_path, tile_filename  # noqa: E402
+from skip_existing import add_force_argument, should_skip_file  # noqa: E402
 
 
 def fill_dem(dem: np.ndarray) -> np.ndarray:
@@ -242,6 +243,7 @@ def main() -> None:
         default=10.0,
         help="Gaussian radius (m) for local_relief mode.",
     )
+    add_force_argument(parser)
     args = parser.parse_args()
 
     # CWD is the project root (same relative layout on Linux/Windows).
@@ -264,10 +266,24 @@ def main() -> None:
         keys = keys_from_coco(args.from_coco, args.year)
     else:
         keys = parse_tile_keys(args.tile_keys, args.year)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     summary = []
+    n_built = 0
+    n_skipped = 0
     for key in tqdm(keys, desc=f"rgb+dsm/{args.year}"):
         ortho_path = resolve_tile_path(args.ortho_dir, key, args.year)
         out_path = args.output_dir / tile_filename(key, args.year)
+        if should_skip_file(out_path, force=args.force):
+            n_skipped += 1
+            summary.append(
+                {
+                    "tile": key,
+                    "output": str(out_path),
+                    "skipped": True,
+                    "dsm_mode": args.dsm_mode,
+                }
+            )
+            continue
         summary.append(
             build_rgb_dsm_tile(
                 ortho_path,
@@ -277,10 +293,23 @@ def main() -> None:
                 relief_radius_m=args.relief_radius_m,
             )
         )
+        n_built += 1
 
     manifest = args.output_dir / "build_rgb_dsm_manifest.json"
     manifest.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps({"tiles": len(summary), "output_dir": str(args.output_dir), "manifest": str(manifest)}, indent=2))
+    print(
+        json.dumps(
+            {
+                "tiles": len(summary),
+                "built": n_built,
+                "skipped": n_skipped,
+                "force": bool(args.force),
+                "output_dir": str(args.output_dir),
+                "manifest": str(manifest),
+            },
+            indent=2,
+        )
+    )
 
     from run_provenance import write_tiling_provenance
 
@@ -297,6 +326,9 @@ def main() -> None:
             "relief_radius_m": args.relief_radius_m,
             "from_coco": str(args.from_coco) if args.from_coco else None,
             "tile_keys": args.tile_keys,
+            "force": bool(args.force),
+            "built": n_built,
+            "skipped": n_skipped,
         },
         tiles_summary=summary,
         parents=[args.ortho_dir, args.dsm],

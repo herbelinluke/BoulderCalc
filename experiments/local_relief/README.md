@@ -61,9 +61,9 @@ BoulderCalculator\experiments\local_relief\run_local_relief.bat
 
 One model only: `--models elevation` or `--models local_relief`.
 
-Reuse tiles / skip train: `--skip-build-tiles`, `--skip-coco`, `--skip-train`.
-Disable early stop: `--early-stop-patience-iters 0`. Enable online rich augs:
-`--rich-aug`.
+Reuse tiles / COCO / aug by default (core scripts skip existing outputs). Rebuild
+with ``--force``. Optional hard skips: `--skip-build-tiles`, `--skip-coco`,
+`--skip-train`.
 
 ## Compare
 

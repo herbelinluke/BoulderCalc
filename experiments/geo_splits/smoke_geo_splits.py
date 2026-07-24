@@ -72,15 +72,15 @@ def ensure_rgb_dsm_tiles(root: Path, py: str, force: bool) -> None:
         if has_tif and not force:
             print(f"[skip] RGB+DSM tiles present: {tile_dir}")
             continue
-        run(
-            [
-                py,
-                str(SCRIPTS / "build_rgb_dsm_tiles.py"),
-                "--year",
-                str(year),
-            ],
-            label=f"build_rgb_dsm_tiles year={year}",
-        )
+        cmd = [
+            py,
+            str(SCRIPTS / "build_rgb_dsm_tiles.py"),
+            "--year",
+            str(year),
+        ]
+        if force:
+            cmd.append("--force")
+        run(cmd, label=f"build_rgb_dsm_tiles year={year}")
 
 
 def missing_four_band_names(coco_dir: Path, tile_dirs: list[Path]) -> list[str]:
@@ -129,15 +129,17 @@ def ensure_tiles_for_coco(root: Path, py: str, coco_dir: Path, label: str) -> No
         flush=True,
     )
     for year in (24, 25):
+        cmd = [
+            py,
+            str(SCRIPTS / "build_rgb_dsm_tiles.py"),
+            "--year",
+            str(year),
+            "--from-coco",
+            str(coco_dir),
+        ]
+        # Default skip-existing fills only missing tiles; never force here.
         run(
-            [
-                py,
-                str(SCRIPTS / "build_rgb_dsm_tiles.py"),
-                "--year",
-                str(year),
-                "--from-coco",
-                str(coco_dir),
-            ],
+            cmd,
             label=f"{label}: build_rgb_dsm_tiles year={year} --from-coco",
         )
     still = missing_four_band_names(coco_dir, [tile_24, tile_25])
@@ -191,45 +193,47 @@ def build_shared_pool(
     ]
     if drop_below_min_area:
         gpkg_cmd.append("--drop-below-min-area")
+    if force_pool:
+        gpkg_cmd.append("--force")
     run(gpkg_cmd, label="shared pool: gpkg_to_coco (all_tiles)")
 
     ensure_tiles_for_coco(root, py, coco_rgb, "shared_pool")
 
     tile_24 = root / "segmentation" / "tiling_rgb_dsm_24"
     tile_25 = root / "segmentation" / "tiling_rgb_dsm_25"
-    run(
-        [
-            py,
-            str(SCRIPTS / "build_coco_rgb_dsm.py"),
-            "--source-coco",
-            str(coco_rgb),
-            "--tile-dirs",
-            str(tile_24),
-            str(tile_25),
-            "--output-dir",
-            str(coco_4b),
-        ],
-        label="shared pool: build_coco_rgb_dsm",
-    )
+    coco4_cmd = [
+        py,
+        str(SCRIPTS / "build_coco_rgb_dsm.py"),
+        "--source-coco",
+        str(coco_rgb),
+        "--tile-dirs",
+        str(tile_24),
+        str(tile_25),
+        "--output-dir",
+        str(coco_4b),
+    ]
+    if force_pool:
+        coco4_cmd.append("--force")
+    run(coco4_cmd, label="shared pool: build_coco_rgb_dsm")
 
     if skip_aug:
         return coco_4b
 
-    run(
-        [
-            py,
-            str(SCRIPTS / "augment_coco_dataset.py"),
-            "--input-dir",
-            str(coco_4b),
-            "--output-dir",
-            str(coco_aug),
-            "--splits",
-            "train",
-            "--jitter",
-            "0.15",
-        ],
-        label="shared pool: offline aug (all tiles in train)",
-    )
+    aug_cmd = [
+        py,
+        str(SCRIPTS / "augment_coco_dataset.py"),
+        "--input-dir",
+        str(coco_4b),
+        "--output-dir",
+        str(coco_aug),
+        "--splits",
+        "train",
+        "--jitter",
+        "0.15",
+    ]
+    if force_pool:
+        aug_cmd.append("--force")
+    run(aug_cmd, label="shared pool: offline aug (all tiles in train)")
     return coco_aug
 
 

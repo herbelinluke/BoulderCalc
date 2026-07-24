@@ -211,6 +211,19 @@ All of these are flags on `train_boulder_local.py`:
 | `--early-stop-patience-iters` | `0` (off) | Stop when `--early-stop-metric` has not improved for N iters since the best eval; also writes `model_best.pth`. Typical: `500`–`1000` with `--eval-period 500`. Requires periodic eval. |
 | `--early-stop-metric` | `segm/AP` | Event-storage key watched by early stopping |
 
+**Reuse existing outputs.** Dataset / tile builders skip work that is already on
+disk unless you pass ``--force``:
+
+| Script | Default reuse |
+|--------|----------------|
+| `build_rgb_dsm_tiles.py` | Skip each output `.tif` that already exists |
+| `gpkg_to_coco.py` | Skip when COCO JSON trio exists (rebuilds if provenance flags differ) |
+| `build_coco_rgb_dsm.py` | Skip when 4-band COCO dir is complete |
+| `augment_coco_dataset.py` | Skip when aug COCO exists with matching jitter/variants/seed |
+
+Experiment runners (`run_local_relief.py`, `smoke_geo_splits.py`) propagate
+``--force`` / ``--force-pool`` / ``--force-tiles`` into those scripts.
+
 Notes:
 - `--resume` and `--weights` are different: resume continues a run from its
   checkpoints; `--weights` sets the *initial* backbone weights.

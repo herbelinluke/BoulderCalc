@@ -126,40 +126,42 @@ def build_one_model(
             ]
             if dsm_mode == "local_relief":
                 cmd.extend(["--relief-radius-m", str(args.relief_radius_m)])
+            if args.force:
+                cmd.append("--force")
             run(cmd, label=f"build_rgb_dsm_tiles year={year} {dsm_mode}")
     else:
         print(f"[skip] tile build ({tile_24}, {tile_25})")
 
     coco_4b = seg / coco_4b_name
-    run(
-        [
-            py,
-            str(SCRIPTS / "build_coco_rgb_dsm.py"),
-            "--source-coco",
-            str(coco_rgb),
-            "--tile-dirs",
-            str(seg / tile_24),
-            str(seg / tile_25),
-            "--output-dir",
-            str(coco_4b),
-        ],
-        label=f"build_coco_rgb_dsm ({model})",
-    )
+    coco4_cmd = [
+        py,
+        str(SCRIPTS / "build_coco_rgb_dsm.py"),
+        "--source-coco",
+        str(coco_rgb),
+        "--tile-dirs",
+        str(seg / tile_24),
+        str(seg / tile_25),
+        "--output-dir",
+        str(coco_4b),
+    ]
+    if args.force:
+        coco4_cmd.append("--force")
+    run(coco4_cmd, label=f"build_coco_rgb_dsm ({model})")
 
     coco_aug = seg / coco_aug_name
-    run(
-        [
-            py,
-            str(SCRIPTS / "augment_coco_dataset.py"),
-            "--input-dir",
-            str(coco_4b),
-            "--output-dir",
-            str(coco_aug),
-            "--jitter",
-            str(args.jitter),
-        ],
-        label=f"offline aug 8x+jitter ({model})",
-    )
+    aug_cmd = [
+        py,
+        str(SCRIPTS / "augment_coco_dataset.py"),
+        "--input-dir",
+        str(coco_4b),
+        "--output-dir",
+        str(coco_aug),
+        "--jitter",
+        str(args.jitter),
+    ]
+    if args.force:
+        aug_cmd.append("--force")
+    run(aug_cmd, label=f"offline aug 8x+jitter ({model})")
 
     if args.skip_train:
         print(f"[skip] train ({model})")
@@ -249,12 +251,17 @@ def main() -> None:
     parser.add_argument(
         "--skip-build-tiles",
         action="store_true",
-        help="Reuse existing 4-band tile dirs for selected models",
+        help="Do not invoke build_rgb_dsm_tiles at all (default: run it; existing tiles are skipped unless --force).",
     )
     parser.add_argument(
         "--skip-coco",
         action="store_true",
-        help="Skip gpkg_to_coco if coco_dataset_both already exists",
+        help="Skip gpkg_to_coco entirely (default: run it; existing coco_dataset_both is reused unless --force).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild tiles/COCO/aug even when outputs already exist.",
     )
     parser.add_argument("--python", default=sys.executable)
     args = parser.parse_args()
@@ -301,29 +308,33 @@ def main() -> None:
         f"mode={args.mode} models={models} min_area_m2={args.min_area_m2} "
         f"jitter={args.jitter} no_rich_aug={args.no_rich_aug} "
         f"max_iter={max_iter} batch_size={batch_size} num_workers={args.num_workers} "
-        f"early_stop_patience_iters={early_stop}"
+        f"early_stop_patience_iters={early_stop} force={args.force}"
     )
 
     coco_rgb = seg / COCO_RGB
-    if not args.skip_coco or not (coco_rgb / "train_annotations.json").is_file():
+    if args.skip_coco and (coco_rgb / "train_annotations.json").is_file() and not args.force:
+        print(f"[skip] existing {coco_rgb} (--skip-coco)")
+    else:
         # Defaults: --boulder-only (deposits iscrowd) + small boulders iscrowd.
+        # gpkg_to_coco itself skips when complete unless --force.
+        gpkg_cmd = [
+            py,
+            str(SCRIPTS / "gpkg_to_coco.py"),
+            "--segmentation-dir",
+            str(seg),
+            "--years",
+            "24,25",
+            "--output-dir",
+            str(coco_rgb),
+            "--min-area-m2",
+            str(args.min_area_m2),
+        ]
+        if args.force:
+            gpkg_cmd.append("--force")
         run(
-            [
-                py,
-                str(SCRIPTS / "gpkg_to_coco.py"),
-                "--segmentation-dir",
-                str(seg),
-                "--years",
-                "24,25",
-                "--output-dir",
-                str(coco_rgb),
-                "--min-area-m2",
-                str(args.min_area_m2),
-            ],
+            gpkg_cmd,
             label="gpkg_to_coco (baseline tiles, iscrowd deposits+small)",
         )
-    else:
-        print(f"[skip] existing {coco_rgb}")
 
     for model in models:
         out_name = MODEL_SPECS[model][out_idx]
