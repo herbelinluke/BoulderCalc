@@ -796,6 +796,125 @@ def summarize_by_split_membership(
     }
 
 
+def _metric_means(rows: list[dict[str, Any]], metrics: Iterable[str]) -> dict[str, float]:
+    out: dict[str, float] = {"n": float(len(rows))}
+    for m in metrics:
+        vals = [float(r[m]) for r in rows if m in r and _is_number(r[m])]
+        out[m] = float(np.nanmean(vals)) if vals else float("nan")
+    return out
+
+
+def classify_empty_gt_tile(row: dict[str, Any]) -> str:
+    """Label a zero-trainable-GT tile by prediction behavior."""
+    gt = int(row.get("gt_count") or 0)
+    pred = int(row.get("pred_count") or 0)
+    if gt > 0:
+        return "has_gt"
+    if pred == 0:
+        return "empty_clean"  # no GT, no preds — vacuous P=R=1
+    return "empty_false_positives"  # no GT but model fired
+
+
+def summarize_holdout_quality(
+    rows: list[dict[str, Any]],
+    *,
+    metrics: tuple[str, ...] = (
+        "coco_AP",
+        "coco_AP50",
+        "coco_AR100",
+        "precision",
+        "recall",
+        "f1",
+    ),
+) -> dict[str, Any]:
+    """Compare all-tiles vs with-GT means and list empty-GT tile outcomes.
+
+    Useful when deciding which hold-out tiles to drop: empty tiles inflate mean
+    recall/precision (vacuous 1.0) or tank them (FPs → 0.0).
+    """
+    with_gt = [r for r in rows if int(r.get("gt_count") or 0) > 0]
+    empty = [r for r in rows if int(r.get("gt_count") or 0) <= 0]
+    empty_clean = [r for r in empty if classify_empty_gt_tile(r) == "empty_clean"]
+    empty_fp = [r for r in empty if classify_empty_gt_tile(r) == "empty_false_positives"]
+
+    def _tile_brief(r: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "stem": r.get("stem"),
+            "year_key": r.get("year_key"),
+            "split": r.get("split"),
+            "gt_count": int(r.get("gt_count") or 0),
+            "pred_count": int(r.get("pred_count") or 0),
+            "precision": r.get("precision"),
+            "recall": r.get("recall"),
+            "coco_AP50": r.get("coco_AP50"),
+            "empty_class": classify_empty_gt_tile(r),
+        }
+
+    return {
+        "n_tiles": len(rows),
+        "n_with_gt": len(with_gt),
+        "n_empty_gt": len(empty),
+        "n_empty_clean": len(empty_clean),
+        "n_empty_false_positives": len(empty_fp),
+        "means_all_tiles": _metric_means(rows, metrics),
+        "means_with_gt_only": _metric_means(with_gt, metrics),
+        "means_empty_gt_only": _metric_means(empty, metrics),
+        "effect_of_dropping_empty_gt": {
+            m: {
+                "all": _metric_means(rows, metrics).get(m),
+                "with_gt": _metric_means(with_gt, metrics).get(m),
+                "delta_with_gt_minus_all": (
+                    float(_metric_means(with_gt, metrics).get(m, float("nan")))
+                    - float(_metric_means(rows, metrics).get(m, float("nan")))
+                    if _is_number(_metric_means(with_gt, metrics).get(m))
+                    and _is_number(_metric_means(rows, metrics).get(m))
+                    else float("nan")
+                ),
+            }
+            for m in metrics
+        },
+        "empty_gt_tiles": [_tile_brief(r) for r in empty],
+        "with_gt_tiles": [_tile_brief(r) for r in with_gt],
+        "notes": (
+            "Empty-GT tiles often get vacuous precision=recall=1 when pred_count=0, "
+            "or precision=recall=0 when the model emits false positives. "
+            "COCO AP/AR are NaN on empty-GT tiles and are already excluded from those means. "
+            "Prefer means_with_gt_only when comparing hold-out quality for boulder detection."
+        ),
+    }
+
+
+def write_holdout_quality_reports(
+    rows: list[dict[str, Any]],
+    output_dir: Path | str,
+    *,
+    split_label: str | None = None,
+) -> dict[str, Path]:
+    """Write ``holdout_quality.json`` (+ optional per-split suffix) and empty-GT CSV."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary = summarize_holdout_quality(rows)
+    suffix = f"_{split_label}" if split_label else ""
+    paths: dict[str, Path] = {}
+    jq = output_dir / f"holdout_quality{suffix}.json"
+    jq.write_text(json.dumps(summary, indent=2) + "\n")
+    paths["holdout_quality"] = jq
+
+    empty_rows = summary["empty_gt_tiles"]
+    csv_path = output_dir / f"empty_gt_tiles{suffix}.csv"
+    if empty_rows:
+        import csv
+
+        with csv_path.open("w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=list(empty_rows[0].keys()))
+            w.writeheader()
+            w.writerows(empty_rows)
+    else:
+        csv_path.write_text("stem,year_key,split,gt_count,pred_count,precision,recall,coco_AP50,empty_class\n")
+    paths["empty_gt_csv"] = csv_path
+    return paths
+
+
 def plot_learning_curves(
     curves: dict[str, list[dict[str, Any]]],
     metric: str = "bbox/AP50",

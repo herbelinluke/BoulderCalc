@@ -33,6 +33,7 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gpkg_to_coco import TILES_24, TILES_25, resolve_tile_path, tile_filename  # noqa: E402
+from skip_existing import add_force_argument, should_skip_file  # noqa: E402
 
 
 def fill_dem(dem: np.ndarray) -> np.ndarray:
@@ -150,9 +151,17 @@ def parse_tile_keys(value: str, year: int) -> list[str]:
 
 
 def keys_from_coco(coco_dir: Path, year: int) -> list[str]:
-    """Derive RR_CC keys from COCO image file_names for the given year."""
+    """Derive RR_CC keys from COCO image file_names for the given year.
+
+    Accepts both raw ortho names and gpkg_to_coco year-prefixed copies, e.g.:
+      25IniSouthOrt_04_34.tif
+      25_25IniSouthOrt_04_34.tif
+      Sites1and2_2024_Orthomosaic_11_07.tif
+      24_Sites1and2_2024_Orthomosaic_11_07.tif
+    """
     keys: list[str] = []
     seen: set[str] = set()
+    year_prefix = f"{year}_"
     for ann_name in (
         "train_annotations.json",
         "validation_annotations.json",
@@ -161,11 +170,13 @@ def keys_from_coco(coco_dir: Path, year: int) -> list[str]:
         path = coco_dir / ann_name
         if not path.exists():
             continue
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         for image in data["images"]:
             name = image["file_name"]
-            # Accept 25IniSouthOrt_04_34.tif or 24_Sites1and2_..._11_07.tif
             stem = Path(name).stem
+            # COCO RGB copies are named ``{year}_{ortho_basename}``.
+            if stem.startswith(year_prefix):
+                stem = stem[len(year_prefix) :]
             parts = stem.split("_")
             if year == 25 and stem.startswith("25IniSouthOrt_") and len(parts) >= 3:
                 key = f"{int(parts[-2])}_{int(parts[-1])}"
@@ -232,6 +243,7 @@ def main() -> None:
         default=10.0,
         help="Gaussian radius (m) for local_relief mode.",
     )
+    add_force_argument(parser)
     args = parser.parse_args()
 
     # CWD is the project root (same relative layout on Linux/Windows).
@@ -245,16 +257,33 @@ def main() -> None:
 
     seg_root = args.ortho_dir.parent if args.ortho_dir.name == "tiling" else args.ortho_dir
     if args.output_dir is None:
-        args.output_dir = seg_root / f"tiling_rgb_dsm_{args.year}"
+        if args.dsm_mode == "local_relief":
+            args.output_dir = seg_root / f"tiling_rgb_dsm_local_relief_{args.year}"
+        else:
+            args.output_dir = seg_root / f"tiling_rgb_dsm_{args.year}"
 
     if args.from_coco is not None:
         keys = keys_from_coco(args.from_coco, args.year)
     else:
         keys = parse_tile_keys(args.tile_keys, args.year)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
     summary = []
+    n_built = 0
+    n_skipped = 0
     for key in tqdm(keys, desc=f"rgb+dsm/{args.year}"):
         ortho_path = resolve_tile_path(args.ortho_dir, key, args.year)
         out_path = args.output_dir / tile_filename(key, args.year)
+        if should_skip_file(out_path, force=args.force):
+            n_skipped += 1
+            summary.append(
+                {
+                    "tile": key,
+                    "output": str(out_path),
+                    "skipped": True,
+                    "dsm_mode": args.dsm_mode,
+                }
+            )
+            continue
         summary.append(
             build_rgb_dsm_tile(
                 ortho_path,
@@ -264,13 +293,28 @@ def main() -> None:
                 relief_radius_m=args.relief_radius_m,
             )
         )
+        n_built += 1
 
     manifest = args.output_dir / "build_rgb_dsm_manifest.json"
-    manifest.write_text(json.dumps(summary, indent=2))
-    print(json.dumps({"tiles": len(summary), "output_dir": str(args.output_dir), "manifest": str(manifest)}, indent=2))
+    manifest.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "tiles": len(summary),
+                "built": n_built,
+                "skipped": n_skipped,
+                "force": bool(args.force),
+                "output_dir": str(args.output_dir),
+                "manifest": str(manifest),
+            },
+            indent=2,
+        )
+    )
 
     from run_provenance import write_tiling_provenance
 
+    # Parents are path references only; DSM is a binary GeoTIFF — do not open it
+    # as text when writing provenance (Windows cp1252 / charmap decode crash).
     write_tiling_provenance(
         args.output_dir,
         tool="build_rgb_dsm_tiles.py",
@@ -282,6 +326,9 @@ def main() -> None:
             "relief_radius_m": args.relief_radius_m,
             "from_coco": str(args.from_coco) if args.from_coco else None,
             "tile_keys": args.tile_keys,
+            "force": bool(args.force),
+            "built": n_built,
+            "skipped": n_skipped,
         },
         tiles_summary=summary,
         parents=[args.ortho_dir, args.dsm],

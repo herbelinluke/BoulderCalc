@@ -205,12 +205,30 @@ All of these are flags on `train_boulder_local.py`:
 | `--no-rich-aug` | off | Disable the coastal aug stack (rotation/flips/scale/photometric); use resize‑only |
 | `--checkpoint-period` | 2000 if `max-iter>=1000`, else short-run formula | Write `model_XXXX.pth` every N iters |
 | `--eval-period` | 500 if `max-iter>=1000`, else short-run formula | Validation COCO eval every N iters (AP in `metrics.json`) |
+| `--early-stop-patience-iters` | `0` (off) | Stop when `--early-stop-metric` has not improved for N iters since the best eval; also writes `model_best.pth`. Typical: `500`–`1000` with `--eval-period 500`. Requires periodic eval. |
+| `--early-stop-metric` | `segm/AP` | Event-storage key watched by early stopping |
+
+**Reuse existing outputs.** Dataset / tile builders skip work that is already on
+disk unless you pass ``--force``:
+
+| Script | Default reuse |
+|--------|----------------|
+| `build_rgb_dsm_tiles.py` | Skip each output `.tif` that already exists |
+| `gpkg_to_coco.py` | Skip when COCO JSON trio exists (rebuilds if provenance flags differ) |
+| `build_coco_rgb_dsm.py` | Skip when 4-band COCO dir is complete |
+| `augment_coco_dataset.py` | Skip when aug COCO exists with matching jitter/variants/seed |
+
+Experiment runners (`smoke_geo_splits.py`, and `run_local_relief.py` on
+`exp/local-relief-dsm`) propagate ``--force`` / ``--force-pool`` /
+``--force-tiles`` into those scripts.
 
 Notes:
 - `--resume` and `--weights` are different: resume continues a run from its
   checkpoints; `--weights` sets the *initial* backbone weights.
 - `--no-eval` means no `metrics_valid.json` is written — evaluate later with the
   steps in [§11](#11-step-5--evaluation--recall).
+- Early stop cuts a long `--max-iter` once validation AP plateaus (saturation).
+  Prefer `model_best.pth` over `model_final.pth` when it fired.
 
 ## 10. Step 4 — Inference
 
@@ -408,9 +426,14 @@ eval curves from `metrics.json`. `--runs name=path` (repeatable), or
 `--output-dir`, `--metrics` (defaults include AP50/AR100).
 
 **`scripts/eval_per_tile.py`** — per‑tile COCO AP/AR + precision/recall heatmaps.
-`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split` + `--model`;
-`--merge-iou` (optional NMS), `--extents` (GeoJSON for QGIS), `--split-config`
-(repeatable; difficulty summary), `--four-band`, `--device`, `--output-dir`*.
+`--gt-json` + `--predictions-dir`, or `--dataset-dir` + `--split`/`--splits` + `--model`;
+`--require-gt` (skip empty hold-outs), `--merge-iou` (optional NMS), `--extents`,
+`--split-config` (repeatable), `--four-band`, `--device` (cpu|cuda), `--output-dir`*.
+Writes `holdout_quality.json` / `empty_gt_tiles.csv` and separate heatmaps per split.
+
+**`scripts/summarize_holdout_quality.py`** — re-summarize existing
+`per_tile_metrics.csv` dirs (no GPU): with-GT means, empty-tile FP lists,
+comparison CSV. `--eval-dir` (repeatable), `--output-dir`.
 
 **Matching** — see [§12](#12-boulder-matching) and `Matching/README.md`.
 

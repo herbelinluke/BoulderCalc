@@ -39,11 +39,15 @@ import argparse
 import json
 import random
 import shutil
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import rasterio
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from skip_existing import add_force_argument, should_skip_coco_dataset  # noqa: E402
 
 VALID_VARIANTS = (
     "hflip",
@@ -400,6 +404,7 @@ def main() -> None:
             "Use train,valid,test for the geo-split weekend experiment."
         ),
     )
+    add_force_argument(parser)
     args = parser.parse_args()
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
@@ -411,6 +416,19 @@ def main() -> None:
     for s in augment_splits:
         if s not in SPLIT_ANN:
             raise ValueError(f"Unknown split {s!r}; expected one of {list(SPLIT_ANN)}")
+
+    if should_skip_coco_dataset(
+        args.output_dir,
+        force=args.force,
+        label="augment_coco_dataset",
+        expected_flags={
+            "jitter": args.jitter,
+            "variants": variants,
+            "seed": args.seed,
+            "splits_augmented": augment_splits,
+        },
+    ):
+        return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary = []

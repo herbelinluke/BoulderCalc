@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 import fiona
@@ -50,6 +51,9 @@ import rasterio
 from rasterio.warp import transform as warp_transform
 from shapely.geometry import box, mapping, shape
 from shapely.ops import transform as shp_transform, unary_union
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from skip_existing import add_force_argument, should_skip_coco_dataset  # noqa: E402
 
 WORKING_EPSG = "EPSG:25829"
 
@@ -1235,12 +1239,28 @@ def main() -> None:
         action="store_true",
         help="Write tile footprints GeoJSON into segmentation-dir/tile_extents/",
     )
+    add_force_argument(parser)
     args = parser.parse_args()
 
     years = [args.year] if args.year is not None else parse_years(args.years, [24, 25])
     seg_dir = args.segmentation_dir
     tile_dir = args.tile_dir or (seg_dir / "tiling")
     output_dir = args.output_dir or default_output_dir(years, seg_dir)
+
+    if should_skip_coco_dataset(
+        output_dir,
+        force=args.force,
+        label="gpkg_to_coco",
+        expected_flags={
+            "years": years,
+            "min_area_m2": args.min_area_m2,
+            "boulder_only": bool(args.boulder_only),
+            "drop_below_min_area": bool(args.drop_below_min_area),
+            "drop_deposits": bool(args.drop_deposits),
+            "split_config": str(args.split_config) if args.split_config else None,
+        },
+    ):
+        return
 
     gpkg_specs = parse_gpkg_specs(
         args.gpkg, years, default_gpkg_specs(years, seg_dir)
