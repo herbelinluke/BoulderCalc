@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .candidates import run_matcher_with_candidates, write_missed_candidates
+from .classes import keep_boulders_only
 from .dedupe import dedupe_polygons
 from .matcher import BoulderMatcher
 from .qc import run_dod_qc, write_dod_qc
@@ -39,6 +40,11 @@ def main():
         help="Softer score floor for missed-match review candidates",
     )
     parser.add_argument("--compute-volume", action="store_true")
+    parser.add_argument(
+        "--include-deposits",
+        action="store_true",
+        help="Keep Class=1 boulder deposits (default: exclude from matching)",
+    )
     parser.add_argument(
         "--dedupe",
         action="store_true",
@@ -79,6 +85,10 @@ def main():
         dsm_path=args.after_dsm,
     ).compute_attributes()
 
+    if not args.include_deposits:
+        before.polygons = keep_boulders_only(before.polygons)
+        after.polygons = keep_boulders_only(after.polygons)
+
     if args.dedupe:
         n_b, n_a = len(before.polygons), len(after.polygons)
         before.polygons = dedupe_polygons(
@@ -109,6 +119,7 @@ def main():
         min_score=args.min_score,
         candidate_radius=args.candidate_radius,
         candidate_min_score=args.candidate_min_score,
+        boulder_only=not args.include_deposits,
     )
 
     results["matches"].to_file(outdir / "matched_boulders.geojson", driver="GeoJSON")

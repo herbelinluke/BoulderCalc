@@ -204,6 +204,7 @@ def run_matcher_with_candidates(
     min_score: float = 0.55,
     candidate_radius: float | None = None,
     candidate_min_score: float = 0.35,
+    boulder_only: bool = True,
 ) -> dict:
     """Match, then attach a ``missed_candidates`` layer for eval review."""
     matcher = BoulderMatcher(
@@ -211,6 +212,7 @@ def run_matcher_with_candidates(
         after=after_survey,
         search_radius=search_radius,
         min_score=min_score,
+        boulder_only=boulder_only,
     )
     results = matcher.match()
     exclude = set()

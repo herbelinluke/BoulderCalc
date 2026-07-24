@@ -10,6 +10,8 @@ from __future__ import annotations
 import geopandas as gpd
 import numpy as np
 
+from .classes import class_column, parse_class_value
+
 
 def _iou(a, b) -> float:
     inter = a.intersection(b).area
@@ -55,6 +57,14 @@ def dedupe_polygons(
         work[score_col] = 1.0
     work[score_col] = work[score_col].fillna(0.0).astype(float)
 
+    # Never suppress a boulder with a deposit (or vice versa) when Class exists.
+    cls_col = class_column(work)
+    classes = (
+        [parse_class_value(v) for v in work[cls_col].tolist()]
+        if cls_col is not None
+        else None
+    )
+
     order = np.argsort(-work[score_col].to_numpy())
     geoms = list(work.geometry)
     centroids = [g.centroid for g in geoms]
@@ -71,6 +81,8 @@ def dedupe_polygons(
         ci = centroids[i]
         for j in order:
             if j == i or suppressed[j]:
+                continue
+            if classes is not None and classes[i] != classes[j]:
                 continue
             gj = geoms[j]
             overlap = _iou(gi, gj) >= iou_thresh

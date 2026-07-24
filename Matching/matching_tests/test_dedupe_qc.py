@@ -78,6 +78,24 @@ def test_dedupe_empty():
     assert out.empty
 
 
+def test_dedupe_does_not_merge_across_class():
+    # Nearby boulder + deposit must both survive (Class-aware NMS).
+    gdf = gpd.GeoDataFrame(
+        {
+            "score": [0.5, 0.9],
+            "Class": [0, 1],
+            "geometry": [
+                make_square(0, 0, 1.0),
+                make_square(0.3, 0.0, 1.0),
+            ],
+        },
+        crs="EPSG:25829",
+    )
+    out = dedupe_polygons(gdf, iou_thresh=0.4, centroid_dist_m=0.75)
+    assert len(out) == 2
+    assert set(out["Class"].astype(str)) == {"0", "1"}
+
+
 def test_classify_match_labels():
     src_ok = {"v_neg_m3": 0.2, "v_pos_m3": 0.0}
     sink_ok = {"v_neg_m3": 0.0, "v_pos_m3": 0.2}

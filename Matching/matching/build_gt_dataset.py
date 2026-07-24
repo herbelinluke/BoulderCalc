@@ -28,6 +28,7 @@ from pathlib import Path
 import geopandas as gpd
 
 from .candidates import run_matcher_with_candidates, write_missed_candidates
+from .classes import keep_boulders_only
 from .dedupe import dedupe_polygons
 from .evaluate_matches import load_manual_annotations
 from .matcher import BoulderMatcher
@@ -82,6 +83,7 @@ def build_dataset(
     before_dsm: Path | None = None,
     after_dsm: Path | None = None,
     compute_volume: bool = False,
+    boulder_only: bool = True,
     source_meta: dict | None = None,
 ) -> dict:
     outdir = Path(outdir)
@@ -102,6 +104,9 @@ def build_dataset(
         after = after.to_crs("EPSG:25829")
 
     n_b_raw, n_a_raw = len(before), len(after)
+    if boulder_only:
+        before = keep_boulders_only(before)
+        after = keep_boulders_only(after)
     if dedupe:
         before = dedupe_polygons(before, iou_thresh=0.4, centroid_dist_m=0.75)
         after = dedupe_polygons(after, iou_thresh=0.4, centroid_dist_m=0.75)
@@ -128,6 +133,7 @@ def build_dataset(
         min_score=min_score,
         candidate_radius=candidate_radius,
         candidate_min_score=candidate_min_score,
+        boulder_only=boulder_only,
     )
 
     _write_geojson(results["matches"], results_dir / "matched_boulders.geojson")
@@ -153,6 +159,7 @@ def build_dataset(
         "appeared": len(results["appeared"]),
         "disappeared": len(results["disappeared"]),
         "missed_candidates": len(results["missed_candidates"]),
+        "boulder_only": bool(boulder_only),
         "source": source_meta or {},
         "tiles": [],  # no inference tiles; eval UI falls back to optional orthos
     }
@@ -194,6 +201,11 @@ def main():
     parser.add_argument("--candidate-radius", type=float, default=25.0)
     parser.add_argument("--candidate-min-score", type=float, default=0.35)
     parser.add_argument("--no-dedupe", action="store_true")
+    parser.add_argument(
+        "--include-deposits",
+        action="store_true",
+        help="Keep Class=1 boulder deposits in matching inputs (default: exclude)",
+    )
     parser.add_argument(
         "--before-dsm",
         type=Path,
@@ -266,6 +278,7 @@ def main():
         before_dsm=before_dsm,
         after_dsm=after_dsm,
         compute_volume=compute_volume,
+        boulder_only=not args.include_deposits,
         source_meta=source,
     )
 

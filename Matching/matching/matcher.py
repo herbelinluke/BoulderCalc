@@ -10,12 +10,15 @@ from scipy.optimize import linear_sum_assignment
 from shapely.geometry import LineString
 
 from .attributes import angle_difference_deg, compute_basic_attributes, safe_log_ratio
+from .classes import keep_boulders_only
 
 
 class BoulderMatcher:
     # Default radius raised so coastal boulder moves beyond ~5 m can still match.
     DEFAULT_SEARCH_RADIUS = 15.0
     DEFAULT_MIN_SCORE = 0.55
+    # Manual GPKGs include Class=1 deposits; matching never uses them.
+    DEFAULT_BOULDER_ONLY = True
 
     def __init__(
         self,
@@ -23,11 +26,13 @@ class BoulderMatcher:
         after,
         search_radius: float = DEFAULT_SEARCH_RADIUS,
         min_score: float = DEFAULT_MIN_SCORE,
+        boulder_only: bool = DEFAULT_BOULDER_ONLY,
     ):
         self.before = before
         self.after = after
         self.search_radius = search_radius
         self.min_score = min_score
+        self.boulder_only = boulder_only
 
         self.weights = {
             "distance": 0.30,
@@ -71,6 +76,10 @@ class BoulderMatcher:
 
         if before_gdf.crs != after_gdf.crs:
             after_gdf = after_gdf.to_crs(before_gdf.crs)
+
+        if self.boulder_only:
+            before_gdf = keep_boulders_only(before_gdf)
+            after_gdf = keep_boulders_only(after_gdf)
 
         before_gdf = compute_basic_attributes(before_gdf).reset_index(drop=True)
         after_gdf = compute_basic_attributes(after_gdf).reset_index(drop=True)
