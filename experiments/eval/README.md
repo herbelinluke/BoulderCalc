@@ -8,8 +8,9 @@ Utilities for comparing training runs and mapping per-tile AP / AR.
 | [`run_compare_report.py`](run_compare_report.py) | **Start here** — compare geo runs → CSV + curve PNGs + `report.md` |
 | [`../../scripts/eval_utils.py`](../../scripts/eval_utils.py) | Library |
 | [`../../scripts/eval_compare_runs.py`](../../scripts/eval_compare_runs.py) | Same comparison as a lower-level CLI |
-| [`../../scripts/eval_per_tile.py`](../../scripts/eval_per_tile.py) | Per-tile scores, heatmaps, optional merge, geo difficulty |
-| [`compare_training_runs.ipynb`](compare_training_runs.ipynb) | Optional notebook (same logic; needs a working kernel) |
+| [`../../scripts/eval_per_tile.py`](../../scripts/eval_per_tile.py) | Per-tile scores, heatmaps (test and/or valid), empty-GT reports |
+| [`../../scripts/summarize_holdout_quality.py`](../../scripts/summarize_holdout_quality.py) | Re-summarize existing CSVs: with-GT means + empty-tile FP list (no GPU) |
+| [`compare_training_runs.ipynb`](compare_training_runs.ipynb) | Optional notebook (WIP; prefer CLIs) |
 
 ## Quick: compare geo-split weekend runs (no Jupyter)
 
@@ -77,6 +78,44 @@ python BoulderCalculator/scripts/build_coco_rgb_dsm.py \
   --tile-dirs segmentation/tiling_rgb_dsm_24 segmentation/tiling_rgb_dsm_25 \
   --output-dir segmentation/coco_geo_baseline_rgb_dsm
 ```
+
+### Empty-GT hold-out quality (no GPU)
+
+Many test tiles have **no trainable boulder GT**. Re-summarize existing CSVs:
+
+```bash
+python BoulderCalculator/scripts/summarize_holdout_quality.py \
+  --eval-dir segmentation/eval_per_tile_rgb_dsm \
+  --eval-dir segmentation/eval_per_tile_local_relief \
+  --eval-dir segmentation/eval_per_tile_geo_split_all \
+  --output-dir segmentation/eval_holdout_quality
+```
+
+Writes `holdout_quality.json`, `empty_gt_tiles.csv` (clean vs false-positive empties),
+with-GT-only heatmaps, and a comparison table. See
+`segmentation/eval_holdout_quality/README.md`.
+
+### Valid + test together (separate graphs)
+
+```bash
+python BoulderCalculator/scripts/eval_per_tile.py \
+  --dataset-dir segmentation/coco_dataset_rgb_dsm \
+  --splits test,valid \
+  --model segmentation/training_run_rgb_dsm/model_final.pth \
+  --four-band --device cuda \
+  --output-dir segmentation/eval_per_tile_rgb_dsm_tv
+```
+
+Each split lands under `output-dir/<split>/` with its own heatmaps
+(`heatmap_valid_*`, `heatmap_test_*`, plus `*_with_gt_*`).
+
+### CPU / laptop (no GPU)
+
+Yes — use `--device cpu`. It is much slower (~minutes per tile). Tips:
+
+- `--require-gt` skips empty hold-out tiles (fewer inferences)
+- Prefer reusing cached `predictions/` + `summarize_holdout_quality.py` when you already have CSVs
+- Default device is already `cpu`
 
 ## Optional notebook
 

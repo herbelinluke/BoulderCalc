@@ -69,6 +69,7 @@ from eval_utils import (  # noqa: E402
     resolve_image_file,
     rows_to_geojson,
     summarize_by_split_membership,
+    write_holdout_quality_reports,
 )
 
 
@@ -210,6 +211,286 @@ def predictions_from_dir(predictions_dir: Path, gt_coco: dict) -> dict[str, list
     return preds_by_stem
 
 
+def _filter_require_gt(gt_coco: dict) -> dict:
+    """Keep images that have ≥1 non-crowd annotation."""
+    trainable_ids = {
+        int(a["image_id"])
+        for a in gt_coco.get("annotations", [])
+        if not a.get("iscrowd", 0)
+    }
+    images = [im for im in gt_coco.get("images", []) if int(im["id"]) in trainable_ids]
+    keep = {int(im["id"]) for im in images}
+    return {
+        **gt_coco,
+        "images": images,
+        "annotations": [a for a in gt_coco.get("annotations", []) if int(a["image_id"]) in keep],
+    }
+
+
+def _resolve_image_dirs(args, gt_path: Path, split_name: str) -> list[Path]:
+    image_dirs: list[Path] = list(args.image_dir)
+    if image_dirs:
+        return image_dirs
+
+    if args.four_band:
+        seg_root = None
+        for base in (
+            Path(args.dataset_dir).parent if args.dataset_dir else None,
+            gt_path.parent.parent,
+            Path("segmentation"),
+        ):
+            if base is None:
+                continue
+            base = Path(base)
+            if base.name == "segmentation" and base.is_dir():
+                seg_root = base
+                break
+            if (base / "segmentation").is_dir():
+                seg_root = base / "segmentation"
+                break
+        if seg_root is not None:
+            for year in ("24", "25"):
+                td = seg_root / f"tiling_rgb_dsm_{year}"
+                if td.is_dir():
+                    image_dirs.append(td)
+            # Prefer dataset split folder when it already has 4-band tiles.
+            if args.dataset_dir is not None:
+                split_dir = Path(args.dataset_dir) / split_name
+                if split_dir.is_dir() and any(split_dir.glob("*.tif")):
+                    image_dirs.insert(0, split_dir)
+            if image_dirs:
+                print(f"Using image dirs: {[str(d) for d in image_dirs]}")
+                return image_dirs
+
+    if args.dataset_dir is not None:
+        split_dir = Path(args.dataset_dir) / split_name
+        if split_dir.is_dir() and any(split_dir.iterdir()):
+            image_dirs.append(split_dir)
+        if (
+            not args.four_band
+            and gt_path.parent.resolve() != Path(args.dataset_dir).resolve()
+        ):
+            sib_split = gt_path.parent / split_name
+            if sib_split.is_dir():
+                image_dirs.append(sib_split)
+    if not image_dirs:
+        parent = gt_path.parent
+        split_dir = parent / split_name
+        if split_dir.is_dir():
+            image_dirs.append(split_dir)
+        elif not args.four_band:
+            for cand in ("test", "valid", "train"):
+                if (parent / cand).is_dir():
+                    image_dirs.append(parent / cand)
+        if not image_dirs:
+            image_dirs.append(parent)
+    return image_dirs
+
+
+def _run_one_split(args, split_name: str, out_dir: Path) -> list[dict]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\n=== Split: {split_name} → {out_dir} ===")
+
+    try:
+        gt_path = resolve_gt_annotations(args.dataset_dir, split_name, args.gt_json)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
+    # When looping multiple splits, --gt-json only applies to the first/sole split.
+    if args.gt_json is not None and args.splits and "," in (args.splits or ""):
+        # Force dataset-dir resolution for subsequent splits.
+        if args.dataset_dir is None:
+            raise SystemExit("Pass --dataset-dir when using --splits with multiple values.")
+        gt_path = resolve_gt_annotations(args.dataset_dir, split_name, None)
+
+    gt_coco = load_coco(gt_path)
+    if args.require_gt:
+        before = len(gt_coco.get("images", []))
+        gt_coco = _filter_require_gt(gt_coco)
+        print(
+            f"require-gt: kept {len(gt_coco['images'])}/{before} tiles with trainable boulders"
+        )
+        if not gt_coco["images"]:
+            raise SystemExit(f"No trainable-GT tiles in {split_name}.")
+
+    image_dirs = _resolve_image_dirs(args, gt_path, split_name)
+
+    if args.model is not None and args.skip_missing and image_dirs:
+        before = len(gt_coco.get("images", []))
+        gt_coco, missing = filter_coco_to_existing_images(gt_coco, image_dirs)
+        if missing:
+            print(
+                f"Skipping {len(missing)}/{before} tiles with no image under "
+                f"{[str(d) for d in image_dirs]}"
+            )
+        if not gt_coco.get("images"):
+            raise SystemExit(
+                "No images found for scoring. Pass --image-dir or use a dataset "
+                "dir whose split folders contain GeoTIFFs."
+            )
+
+    if args.model is not None:
+        if not image_dirs:
+            raise SystemExit("--model requires a resolvable --image-dir / dataset split folder.")
+        preds_by_stem = predict_split(args, gt_coco, image_dirs)
+        if args.skip_missing:
+            keep = set(preds_by_stem)
+            before = len(gt_coco.get("images", []))
+            gt_coco = {
+                **gt_coco,
+                "images": [im for im in gt_coco["images"] if Path(im["file_name"]).stem in keep],
+            }
+            keep_ids = {int(im["id"]) for im in gt_coco["images"]}
+            gt_coco["annotations"] = [
+                a for a in gt_coco.get("annotations", []) if int(a["image_id"]) in keep_ids
+            ]
+            dropped = before - len(gt_coco["images"])
+            if dropped:
+                print(f"Scoring {len(gt_coco['images'])} tiles ({dropped} skipped).")
+            if not gt_coco["images"]:
+                raise SystemExit("No tiles scored after missing-image filter.")
+        pred_out = out_dir / "predictions"
+        pred_out.mkdir(exist_ok=True)
+        for stem, dets in preds_by_stem.items():
+            (pred_out / f"{stem}_detections.coco.json").write_text(
+                json.dumps(
+                    {
+                        "annotations": [
+                            {**d, "id": i, "image_id": 1}
+                            for i, d in enumerate(dets, start=1)
+                        ]
+                    },
+                    indent=2,
+                )
+            )
+    elif args.predictions_dir is not None:
+        preds_by_stem = predictions_from_dir(args.predictions_dir, gt_coco)
+    else:
+        raise SystemExit("Pass --predictions-dir or --model.")
+
+    rows = evaluate_coco_split_per_tile(
+        gt_coco,
+        preds_by_stem,
+        iou_type=args.iou_type,
+        match_iou=args.match_iou,
+        merge_iou=args.merge_iou,
+    )
+    for r in rows:
+        r["split"] = split_name
+
+    df = pd.DataFrame(rows)
+    csv_path = out_dir / "per_tile_metrics.csv"
+    df.to_csv(csv_path, index=False)
+    print(f"Wrote {csv_path} ({len(df)} tiles)")
+
+    agg_cols = [
+        c
+        for c in (
+            "coco_AP",
+            "coco_AP50",
+            "coco_AR100",
+            "precision",
+            "recall",
+            "f1",
+            "gt_count",
+            "pred_count",
+        )
+        if c in df.columns
+    ]
+    print("\nPer-tile means (all tiles):")
+    print(df[agg_cols].mean(numeric_only=True).to_string())
+    with_gt = df[df["gt_count"] > 0] if "gt_count" in df.columns else df.iloc[0:0]
+    if len(with_gt):
+        print(f"\nPer-tile means (with GT only, n={len(with_gt)}):")
+        print(with_gt[agg_cols].mean(numeric_only=True).to_string())
+
+    hq_paths = write_holdout_quality_reports(rows, out_dir, split_label=split_name)
+    for label, path in hq_paths.items():
+        print(f"Wrote {path}")
+
+    prefix = f"{split_name} "
+    if args.merge_iou is not None:
+        prefix = f"{split_name} merged "
+    figs = plot_tile_heatmaps(
+        rows,
+        metrics=("coco_AP50", "coco_AR100", "recall", "precision"),
+        title_prefix=prefix,
+    )
+    for metric, fig in figs:
+        out = out_dir / f"heatmap_{split_name}_{metric}.png"
+        fig.savefig(out, dpi=140)
+        fig.savefig(out_dir / f"heatmap_{metric}.png", dpi=140)
+        plt.close(fig)
+        print(f"Wrote {out}")
+
+    # With-GT-only heatmaps (easier to parse when many empty tiles).
+    rows_gt = [r for r in rows if int(r.get("gt_count") or 0) > 0]
+    if rows_gt:
+        figs_gt = plot_tile_heatmaps(
+            rows_gt,
+            metrics=("coco_AP50", "coco_AR100", "recall", "precision"),
+            title_prefix=f"{split_name} with-GT ",
+        )
+        for metric, fig in figs_gt:
+            out = out_dir / f"heatmap_{split_name}_with_gt_{metric}.png"
+            fig.savefig(out, dpi=140)
+            plt.close(fig)
+            print(f"Wrote {out}")
+
+    if args.extents is not None and args.extents.exists():
+        gj = rows_to_geojson(rows, args.extents)
+        gj_path = out_dir / "per_tile_metrics.geojson"
+        gj_path.write_text(json.dumps(gj))
+        print(f"Wrote {gj_path}")
+
+    difficulty = {}
+    membership = args.difficulty_split if args.difficulty_split else split_name
+    for cfg_path in args.split_config:
+        cfg = load_split_yaml(cfg_path)
+        setup_id = cfg.get("id") or Path(cfg_path).stem
+        difficulty[setup_id] = {
+            "config": str(cfg_path),
+            "membership_split": membership,
+            "coco_AP50": summarize_by_split_membership(
+                rows, cfg, metric="coco_AP50", membership_split=membership
+            ),
+            "coco_AR100": summarize_by_split_membership(
+                rows, cfg, metric="coco_AR100", membership_split=membership
+            ),
+            "recall": summarize_by_split_membership(
+                rows, cfg, metric="recall", membership_split=membership
+            ),
+        }
+    if difficulty:
+        diff_path = out_dir / "split_difficulty_summary.json"
+        diff_path.write_text(json.dumps(difficulty, indent=2))
+        print(f"\nSplit difficulty (membership={membership}):")
+        for setup_id, block in difficulty.items():
+            ap = block["coco_AP50"]
+            ar = block["coco_AR100"]
+            print(
+                f"  {setup_id:20s}  n={ap['n']:3d}  "
+                f"AP50={ap['mean']:.2f}±{ap['std']:.2f}  "
+                f"AR100={ar['mean']:.2f}±{ar['std']:.2f}"
+            )
+        print(f"Wrote {diff_path}")
+
+    meta = {
+        "split": split_name,
+        "gt_images": len(gt_coco["images"]),
+        "require_gt": bool(args.require_gt),
+        "merge_iou": args.merge_iou,
+        "match_iou": args.match_iou,
+        "iou_type": args.iou_type,
+        "device": args.device,
+        "model": str(args.model) if args.model else None,
+        "predictions_dir": str(args.predictions_dir) if args.predictions_dir else None,
+        "dataset_dir": str(args.dataset_dir) if args.dataset_dir else None,
+        "gt_json": str(gt_path),
+    }
+    (out_dir / "eval_meta.json").write_text(json.dumps(meta, indent=2))
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gt-json", type=Path, default=None, help="COCO GT JSON (one split).")
@@ -217,8 +498,17 @@ def main() -> None:
     parser.add_argument(
         "--split",
         choices=["train", "valid", "test"],
-        default="test",
-        help="Which split under --dataset-dir (ignored if --gt-json is set).",
+        default=None,
+        help="Single split under --dataset-dir (default: test if --splits unset).",
+    )
+    parser.add_argument(
+        "--splits",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated splits to evaluate (e.g. test,valid). "
+            "Writes each split under output-dir/<split>/ with separate heatmaps."
+        ),
     )
     parser.add_argument(
         "--image-dir",
@@ -231,11 +521,21 @@ def main() -> None:
         "--skip-missing",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop tiles whose images are not found (default: true). Use --no-skip-missing to score them as empty preds.",
+        help="Drop tiles whose images are not found (default: true).",
+    )
+    parser.add_argument(
+        "--require-gt",
+        action="store_true",
+        help="Only score tiles with ≥1 non-crowd GT boulder.",
     )
     parser.add_argument("--predictions-dir", type=Path, default=None)
     parser.add_argument("--model", type=Path, default=None, help="Run inference with this checkpoint.")
-    parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    parser.add_argument(
+        "--device",
+        default="cpu",
+        choices=["cpu", "cuda"],
+        help="Inference device. CPU works without a GPU (slower).",
+    )
     parser.add_argument("--four-band", action="store_true")
     parser.add_argument("--score-thresh", type=float, default=0.4)
     parser.add_argument("--image-size", type=int, default=2000)
@@ -259,226 +559,42 @@ def main() -> None:
         "--split-config",
         action="append",
         default=[],
-        help="Geo-split YAML (repeatable). Summarizes mean metrics on that setup's test tiles.",
+        help="Geo-split YAML (repeatable). Summarizes mean metrics on that setup's membership.",
     )
     parser.add_argument(
         "--difficulty-split",
-        default="test",
+        default=None,
         choices=["train", "valid", "test"],
-        help="Which membership split to average when using --split-config.",
+        help="Membership split for --split-config (default: the split being evaluated).",
     )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        gt_path = resolve_gt_annotations(args.dataset_dir, args.split, args.gt_json)
-    except FileNotFoundError as exc:
-        raise SystemExit(str(exc)) from exc
-    gt_coco = load_coco(gt_path)
-
-    image_dirs: list[Path] = list(args.image_dir)
-    if not image_dirs:
-        # Prefer 4-band tiling dirs when --four-band (RGB sibling test/ is 3-band).
-        if args.four_band:
-            seg_root = None
-            for base in (
-                Path(args.dataset_dir).parent if args.dataset_dir else None,
-                gt_path.parent.parent,
-                Path("segmentation"),
-            ):
-                if base is None:
-                    continue
-                base = Path(base)
-                if base.name == "segmentation" and base.is_dir():
-                    seg_root = base
-                    break
-                if (base / "segmentation").is_dir():
-                    seg_root = base / "segmentation"
-                    break
-            if seg_root is not None:
-                for year in ("24", "25"):
-                    td = seg_root / f"tiling_rgb_dsm_{year}"
-                    if td.is_dir():
-                        image_dirs.append(td)
-            if image_dirs:
-                print(f"Using 4-band tile dirs: {[str(d) for d in image_dirs]}")
-
-        if not image_dirs and args.dataset_dir is not None:
-            split_dir = Path(args.dataset_dir) / args.split
-            if split_dir.is_dir() and any(split_dir.iterdir()):
-                image_dirs.append(split_dir)
-            # Only fall back to RGB sibling images when NOT four-band.
-            if (
-                not args.four_band
-                and gt_path.parent.resolve() != Path(args.dataset_dir).resolve()
-            ):
-                sib_split = gt_path.parent / args.split
-                if sib_split.is_dir():
-                    image_dirs.append(sib_split)
-        if not image_dirs:
-            parent = gt_path.parent
-            if not args.four_band:
-                for cand in ("test", "valid", "train"):
-                    if (parent / cand).is_dir():
-                        image_dirs.append(parent / cand)
-            if not image_dirs:
-                image_dirs.append(parent)
-
-    if args.model is not None and args.four_band and not args.image_dir:
-        # Guard: refuse obviously 3-band-only dirs when user didn't override.
-        pass
-
-    if args.model is not None and args.skip_missing and image_dirs:
-        before = len(gt_coco.get("images", []))
-        gt_coco, missing = filter_coco_to_existing_images(gt_coco, image_dirs)
-        if missing:
-            print(
-                f"Skipping {len(missing)}/{before} tiles with no image under "
-                f"{[str(d) for d in image_dirs]} (pass --image-dir to add folders)."
-            )
-        if not gt_coco.get("images"):
-            raise SystemExit(
-                "No images found for scoring. For 4-band models pass:\n"
-                "  --image-dir segmentation/tiling_rgb_dsm_24 "
-                "--image-dir segmentation/tiling_rgb_dsm_25\n"
-                "or rebuild with build_coco_rgb_dsm.py."
-            )
-
-    if args.model is not None:
-        if not image_dirs:
-            raise SystemExit("--model requires a resolvable --image-dir / dataset split folder.")
-        preds_by_stem = predict_split(args, gt_coco, image_dirs)
-        if args.skip_missing:
-            keep = set(preds_by_stem)
-            before = len(gt_coco.get("images", []))
-            gt_coco = {
-                **gt_coco,
-                "images": [im for im in gt_coco["images"] if Path(im["file_name"]).stem in keep],
-            }
-            keep_ids = {int(im["id"]) for im in gt_coco["images"]}
-            gt_coco["annotations"] = [
-                a for a in gt_coco.get("annotations", []) if int(a["image_id"]) in keep_ids
-            ]
-            dropped = before - len(gt_coco["images"])
-            if dropped:
-                print(f"Scoring {len(gt_coco['images'])} tiles ({dropped} skipped: missing/wrong band).")
-            if not gt_coco["images"]:
-                raise SystemExit(
-                    "No 4-band tiles scored. Pass --image-dir segmentation/tiling_rgb_dsm_24 "
-                    "--image-dir segmentation/tiling_rgb_dsm_25 "
-                    "(or rebuild coco_geo_baseline_rgb_dsm)."
-                )
-        # Cache predictions for reuse.
-        pred_out = args.output_dir / "predictions"
-        pred_out.mkdir(exist_ok=True)
-        for stem, dets in preds_by_stem.items():
-            (pred_out / f"{stem}_detections.coco.json").write_text(
-                json.dumps(
-                    {
-                        "annotations": [
-                            {
-                                **d,
-                                "id": i,
-                                "image_id": 1,
-                            }
-                            for i, d in enumerate(dets, start=1)
-                        ]
-                    },
-                    indent=2,
-                )
-            )
-    elif args.predictions_dir is not None:
-        preds_by_stem = predictions_from_dir(args.predictions_dir, gt_coco)
+    if args.splits:
+        split_names = [s.strip() for s in args.splits.split(",") if s.strip()]
+    elif args.split:
+        split_names = [args.split]
+    elif args.gt_json is not None:
+        split_names = ["test"]
     else:
-        raise SystemExit("Pass --predictions-dir or --model.")
+        split_names = ["test"]
 
-    rows = evaluate_coco_split_per_tile(
-        gt_coco,
-        preds_by_stem,
-        iou_type=args.iou_type,
-        match_iou=args.match_iou,
-        merge_iou=args.merge_iou,
-    )
-    df = pd.DataFrame(rows)
-    csv_path = args.output_dir / "per_tile_metrics.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Wrote {csv_path} ({len(df)} tiles)")
+    all_rows: list[dict] = []
+    multi = len(split_names) > 1
+    for split_name in split_names:
+        out_dir = args.output_dir / split_name if multi else args.output_dir
+        # Clear gt-json after first split when multi so later splits use dataset-dir.
+        rows = _run_one_split(args, split_name, out_dir)
+        all_rows.extend(rows)
+        if multi and args.gt_json is not None:
+            args.gt_json = None
 
-    # Headline aggregates.
-    agg_cols = [
-        c
-        for c in (
-            "coco_AP",
-            "coco_AP50",
-            "coco_AR100",
-            "precision",
-            "recall",
-            "f1",
-            "gt_count",
-            "pred_count",
-        )
-        if c in df.columns
-    ]
-    print("\nPer-tile means:")
-    print(df[agg_cols].mean(numeric_only=True).to_string())
-
-    figs = plot_tile_heatmaps(
-        rows,
-        metrics=("coco_AP50", "coco_AR100", "recall", "precision"),
-        title_prefix=("merged " if args.merge_iou is not None else ""),
-    )
-    for metric, fig in figs:
-        out = args.output_dir / f"heatmap_{metric}.png"
-        fig.savefig(out, dpi=140)
-        plt.close(fig)
-        print(f"Wrote {out}")
-
-    if args.extents is not None and args.extents.exists():
-        gj = rows_to_geojson(rows, args.extents)
-        gj_path = args.output_dir / "per_tile_metrics.geojson"
-        gj_path.write_text(json.dumps(gj))
-        print(f"Wrote {gj_path}")
-
-    difficulty = {}
-    for cfg_path in args.split_config:
-        cfg = load_split_yaml(cfg_path)
-        setup_id = cfg.get("id") or Path(cfg_path).stem
-        difficulty[setup_id] = {
-            "config": str(cfg_path),
-            "membership_split": args.difficulty_split,
-            "coco_AP50": summarize_by_split_membership(
-                rows, cfg, metric="coco_AP50", membership_split=args.difficulty_split
-            ),
-            "coco_AR100": summarize_by_split_membership(
-                rows, cfg, metric="coco_AR100", membership_split=args.difficulty_split
-            ),
-            "recall": summarize_by_split_membership(
-                rows, cfg, metric="recall", membership_split=args.difficulty_split
-            ),
-        }
-    if difficulty:
-        diff_path = args.output_dir / "split_difficulty_summary.json"
-        diff_path.write_text(json.dumps(difficulty, indent=2))
-        print(f"\nSplit difficulty (mean per-tile metrics on each setup's {args.difficulty_split} tiles):")
-        for setup_id, block in difficulty.items():
-            ap = block["coco_AP50"]
-            ar = block["coco_AR100"]
-            print(
-                f"  {setup_id:20s}  n={ap['n']:3d}  "
-                f"AP50={ap['mean']:.2f}±{ap['std']:.2f}  "
-                f"AR100={ar['mean']:.2f}±{ar['std']:.2f}"
-            )
-        print(f"Wrote {diff_path}")
-
-    meta = {
-        "gt_images": len(gt_coco["images"]),
-        "merge_iou": args.merge_iou,
-        "match_iou": args.match_iou,
-        "iou_type": args.iou_type,
-        "model": str(args.model) if args.model else None,
-        "predictions_dir": str(args.predictions_dir) if args.predictions_dir else None,
-    }
-    (args.output_dir / "eval_meta.json").write_text(json.dumps(meta, indent=2))
+    if multi and all_rows:
+        combined = args.output_dir / "per_tile_metrics_all_splits.csv"
+        pd.DataFrame(all_rows).to_csv(combined, index=False)
+        print(f"\nWrote combined {combined}")
+        hq = write_holdout_quality_reports(all_rows, args.output_dir, split_label="all_splits")
+        print(f"Wrote {hq['holdout_quality']}")
 
 
 if __name__ == "__main__":
