@@ -59,17 +59,27 @@ def argv_command() -> list[str]:
     return [str(a) for a in sys.argv]
 
 
+def _is_provenance_json(path: Path) -> bool:
+    """True for known sidecar names (never treat GeoTIFF/GPKG/etc. as JSON)."""
+    name = path.name
+    return name in (DATASET_PROVENANCE, TRAINING_PROVENANCE, TILING_PROVENANCE) or name.endswith(
+        "_provenance.json"
+    )
+
+
 def load_provenance(path: Path | str) -> dict[str, Any] | None:
     path = Path(path)
     if path.is_dir():
         for name in (DATASET_PROVENANCE, TRAINING_PROVENANCE, TILING_PROVENANCE):
             cand = path / name
             if cand.is_file():
-                return json.loads(cand.read_text())
+                return json.loads(cand.read_text(encoding="utf-8"))
         return None
-    if not path.is_file():
+    if not path.is_file() or not _is_provenance_json(path):
+        # Avoid reading binary parents (e.g. DSM .tif) as text — on Windows that
+        # raises UnicodeDecodeError with the locale 'charmap' codec.
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def parent_ref(path: Path | str | None) -> dict[str, Any] | None:
@@ -78,13 +88,19 @@ def parent_ref(path: Path | str | None) -> dict[str, Any] | None:
         return None
     path = Path(path)
     ref: dict[str, Any] = {"path": str(path.resolve() if path.exists() else path)}
+    # Only directories (or explicit provenance JSON files) can carry sidecars.
+    if path.is_file() and not _is_provenance_json(path):
+        return ref
     prov = load_provenance(path)
     if prov is not None:
         # Prefer the actual sidecar name that loaded.
-        for name in (DATASET_PROVENANCE, TRAINING_PROVENANCE, TILING_PROVENANCE):
-            if (path / name).is_file():
-                ref["provenance_file"] = name
-                break
+        if path.is_dir():
+            for name in (DATASET_PROVENANCE, TRAINING_PROVENANCE, TILING_PROVENANCE):
+                if (path / name).is_file():
+                    ref["provenance_file"] = name
+                    break
+        else:
+            ref["provenance_file"] = path.name
         ref["parent_tool"] = prov.get("tool")
         ref["parent_flags"] = prov.get("flags")
         ref["parent_kind"] = prov.get("kind")
@@ -93,7 +109,10 @@ def parent_ref(path: Path | str | None) -> dict[str, Any] | None:
 
 def write_json(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_jsonable(payload), indent=2) + "\n")
+    path.write_text(
+        json.dumps(_jsonable(payload), indent=2) + "\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -224,7 +243,7 @@ def update_training_metrics(
     path = output_dir / TRAINING_PROVENANCE
     if not path.is_file():
         return None
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     data["metrics_valid"] = _jsonable(metrics_valid)
     data["metrics_valid_updated_utc"] = utc_now()
     write_json(path, data)

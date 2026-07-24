@@ -269,11 +269,13 @@ def main() -> None:
         )
 
     manifest = args.output_dir / "build_rgb_dsm_manifest.json"
-    manifest.write_text(json.dumps(summary, indent=2))
+    manifest.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps({"tiles": len(summary), "output_dir": str(args.output_dir), "manifest": str(manifest)}, indent=2))
 
     from run_provenance import write_tiling_provenance
 
+    # Parents are path references only; DSM is a binary GeoTIFF — do not open it
+    # as text when writing provenance (Windows cp1252 / charmap decode crash).
     write_tiling_provenance(
         args.output_dir,
         tool="build_rgb_dsm_tiles.py",
