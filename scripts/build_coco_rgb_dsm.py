@@ -5,6 +5,10 @@ Copies annotation JSON from an existing RGB COCO dataset and replaces each
 split image with the matching 4-band GeoTIFF (same file_name) from one or more
 tiling_rgb_dsm_* directories.
 
+By default, coverage ignore is refreshed on the 4-band images (RGB bands +
+year DSM nodata) so black-edge / gated DSM-gap iscrowd regions stay accurate
+even if the source RGB COCO was built without DSM gating.
+
 Example:
   python BoulderCalculator/scripts/build_coco_rgb_dsm.py \\
     --source-coco segmentation/coco_dataset \\
@@ -22,6 +26,14 @@ from pathlib import Path
 import rasterio
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from coverage_ignore import (  # noqa: E402
+    DEFAULT_BLUR_M,
+    DEFAULT_MIN_AREA_M2,
+    DEFAULT_OVERLAP_FRAC,
+    DEFAULT_RGB_MAX,
+    default_dsm_path,
+    refresh_split_coverage,
+)
 from file_link import add_link_mode_argument, link_or_copy  # noqa: E402
 from skip_existing import (  # noqa: E402
     add_force_argument,
@@ -61,6 +73,12 @@ def copy_split(
     *,
     force: bool,
     link_mode: str,
+    coverage_ignore: bool,
+    project_root: Path,
+    coverage_rgb_max: int,
+    coverage_blur_m: float,
+    coverage_min_area_m2: float,
+    coverage_overlap_frac: float,
 ) -> dict:
     ann_src = source_coco / ann_name
     data = json.loads(ann_src.read_text(encoding="utf-8"))
@@ -82,6 +100,25 @@ def copy_split(
         modes_used[used] = modes_used.get(used, 0) + 1
         copied.append(image["file_name"])
 
+    coverage_stats = None
+    if coverage_ignore:
+        dsm_by_year: dict[int, Path] = {}
+        for year in (24, 25):
+            path = default_dsm_path(project_root, year)
+            if path.is_file():
+                dsm_by_year[year] = path
+        data = refresh_split_coverage(
+            data,
+            split_out,
+            dsm_by_year=dsm_by_year,
+            project_root=project_root,
+            rgb_max=coverage_rgb_max,
+            blur_m=coverage_blur_m,
+            min_area_m2=coverage_min_area_m2,
+            overlap_frac=coverage_overlap_frac,
+        )
+        coverage_stats = data.pop("_coverage_refresh_stats", None)
+
     (output_dir / ann_name).write_text(json.dumps(data), encoding="utf-8")
     return {
         "split": split,
@@ -90,6 +127,7 @@ def copy_split(
         "skipped": skipped,
         "link_modes": modes_used,
         "ann": ann_name,
+        "coverage_refresh": coverage_stats,
     }
 
 
@@ -114,6 +152,26 @@ def main() -> None:
         default=Path("segmentation/coco_dataset_rgb_dsm"),
         help="Output 4-band COCO dataset dir. Default: segmentation/coco_dataset_rgb_dsm",
     )
+    parser.add_argument(
+        "--coverage-ignore",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Refresh coverage iscrowd on 4-band images (default: on).",
+    )
+    parser.add_argument("--coverage-rgb-max", type=int, default=DEFAULT_RGB_MAX)
+    parser.add_argument("--coverage-blur-m", type=float, default=DEFAULT_BLUR_M)
+    parser.add_argument(
+        "--coverage-min-area-m2", type=float, default=DEFAULT_MIN_AREA_M2
+    )
+    parser.add_argument(
+        "--coverage-overlap-frac", type=float, default=DEFAULT_OVERLAP_FRAC
+    )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path("."),
+        help="Project root with 2024/ and 2025/ DSMs (default: .).",
+    )
     add_force_argument(parser)
     add_link_mode_argument(parser, default="hard")
     args = parser.parse_args()
@@ -122,11 +180,19 @@ def main() -> None:
         args.output_dir,
         force=args.force,
         label="build_coco_rgb_dsm",
-        expected_flags={"four_band": True},
+        expected_flags={
+            "four_band": True,
+            "coverage_ignore": bool(args.coverage_ignore),
+            "coverage_rgb_max": int(args.coverage_rgb_max),
+            "coverage_blur_m": float(args.coverage_blur_m),
+            "coverage_min_area_m2": float(args.coverage_min_area_m2),
+            "coverage_overlap_frac": float(args.coverage_overlap_frac),
+        },
     ):
         return
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    project_root = args.project_root.resolve()
     summary = []
     for split, ann in [
         ("train", "train_annotations.json"),
@@ -142,6 +208,12 @@ def main() -> None:
                 args.tile_dirs,
                 force=args.force,
                 link_mode=args.link_mode,
+                coverage_ignore=bool(args.coverage_ignore),
+                project_root=project_root,
+                coverage_rgb_max=int(args.coverage_rgb_max),
+                coverage_blur_m=float(args.coverage_blur_m),
+                coverage_min_area_m2=float(args.coverage_min_area_m2),
+                coverage_overlap_frac=float(args.coverage_overlap_frac),
             )
         )
 
@@ -150,6 +222,7 @@ def main() -> None:
         "output": str(args.output_dir),
         "force": bool(args.force),
         "link_mode": args.link_mode,
+        "coverage_ignore": bool(args.coverage_ignore),
         "splits": summary,
     }
     (args.output_dir / "build_coco_rgb_dsm_summary.json").write_text(
@@ -168,10 +241,18 @@ def main() -> None:
             "four_band": True,
             "force": bool(args.force),
             "link_mode": args.link_mode,
+            "coverage_ignore": bool(args.coverage_ignore),
+            "coverage_rgb_max": int(args.coverage_rgb_max),
+            "coverage_blur_m": float(args.coverage_blur_m),
+            "coverage_min_area_m2": float(args.coverage_min_area_m2),
+            "coverage_overlap_frac": float(args.coverage_overlap_frac),
         },
         splits_summary=summary,
         parents=[args.source_coco, *args.tile_dirs],
-        notes="COCO annotations from source RGB dataset; images replaced with 4-band RGB+DSM tiles.",
+        notes=(
+            "COCO annotations from source RGB dataset; images replaced with "
+            "4-band RGB+DSM tiles; coverage ignore refreshed unless disabled."
+        ),
         extra={"legacy_summary_file": "build_coco_rgb_dsm_summary.json"},
     )
 

@@ -26,6 +26,12 @@ Deposit / small-boulder handling (orthogonal flags):
 Train with ``train_boulder_local.py``, which treats ``iscrowd=1`` as neither
 positives nor negatives.
 
+Coverage ignore (default on): border-connected near-black RGB voids (+ blur
+dilate) and DSM gaps gated to those voids become ``iscrowd`` ignore regions on
+train/valid/test. Textured ocean is not masked. Rebuild COCO after changing
+these knobs (``--force`` when skip-existing is active). Use
+``--no-coverage-ignore`` to disable.
+
 Example (both years, per-year GPKGs, boulder-only):
     python BoulderCalculator/scripts/gpkg_to_coco.py \\
         --segmentation-dir segmentation \\
@@ -779,6 +785,13 @@ def convert_tile(
     tile_year: int | None = None,
     drop_below_min_area: bool = False,
     drop_deposits: bool = False,
+    *,
+    coverage_ignore: bool = True,
+    dsm_path: Path | None = None,
+    coverage_rgb_max: int = 8,
+    coverage_blur_m: float = 0.5,
+    coverage_min_area_m2: float = 1.0,
+    coverage_overlap_frac: float = 0.5,
 ) -> tuple[dict, list[dict], int, dict]:
     with rasterio.open(image_path) as ds:
         transform = ds.transform
@@ -807,6 +820,8 @@ def convert_tile(
         "deposit": 0,
         "dropped_small": 0,
         "dropped_deposit": 0,
+        "coverage": 0,
+        "coverage_overlap": 0,
     }
     for item in feats:
         geom, cls = item[0], item[1]
@@ -876,6 +891,40 @@ def convert_tile(
                 per_class["boulder"] += 1
             ann_id += 1
 
+    if coverage_ignore:
+        from coverage_ignore import build_tile_coverage
+
+        cov_anns, ann_id, cov_stats = build_tile_coverage(
+            image_path,
+            dsm_path=dsm_path,
+            image_id=image_id,
+            ann_start_id=ann_id,
+            rgb_max=coverage_rgb_max,
+            blur_m=coverage_blur_m,
+            min_area_m2=coverage_min_area_m2,
+            overlap_frac=coverage_overlap_frac,
+            existing_annotations=annotations,
+        )
+        # Re-tally after coverage_overlap may have flipped positives → crowd.
+        per_class["boulder"] = 0
+        per_class["deposit"] = 0
+        per_class["crowd"] = 0
+        per_class["coverage_overlap"] = 0
+        for ann in annotations:
+            reason = (ann.get("attributes") or {}).get("ignore_reason")
+            if reason == "coverage_overlap":
+                per_class["coverage_overlap"] += 1
+                per_class["crowd"] += 1
+            elif ann.get("iscrowd", 0):
+                per_class["crowd"] += 1
+            elif ann.get("category_id") == 2:
+                per_class["deposit"] += 1
+            else:
+                per_class["boulder"] += 1
+        annotations.extend(cov_anns)
+        per_class["coverage"] = cov_stats["coverage_polys"]
+        per_class["crowd"] += cov_stats["coverage_polys"]
+
     return image_info, annotations, ann_id, per_class
 
 
@@ -942,6 +991,12 @@ def build_split(
     *,
     expand_chips: bool = False,
     link_mode: str = "copy",
+    coverage_ignore: bool = True,
+    dsm_by_year: dict[int, Path] | None = None,
+    coverage_rgb_max: int = 8,
+    coverage_blur_m: float = 0.5,
+    coverage_min_area_m2: float = 1.0,
+    coverage_overlap_frac: float = 0.5,
 ) -> dict:
     from file_link import link_or_copy
 
@@ -958,6 +1013,8 @@ def build_split(
         "deposit": 0,
         "dropped_small": 0,
         "dropped_deposit": 0,
+        "coverage": 0,
+        "coverage_overlap": 0,
     }
     # Two-class only when deposits are kept as trainable category 2.
     two_class = (not boulder_only) and (not drop_deposits)
@@ -988,6 +1045,9 @@ def build_split(
         used = link_or_copy(src_image, split_image_dir / dst_name, link_mode)
         link_modes_used[used] = link_modes_used.get(used, 0) + 1
 
+        dsm_path = None
+        if coverage_ignore and dsm_by_year:
+            dsm_path = dsm_by_year.get(year)
         image_info, anns, ann_id, per_class = convert_tile(
             src_image,
             feats,
@@ -999,14 +1059,23 @@ def build_split(
             tile_year=year,
             drop_below_min_area=drop_below_min_area,
             drop_deposits=drop_deposits,
+            coverage_ignore=coverage_ignore,
+            dsm_path=dsm_path,
+            coverage_rgb_max=coverage_rgb_max,
+            coverage_blur_m=coverage_blur_m,
+            coverage_min_area_m2=coverage_min_area_m2,
+            coverage_overlap_frac=coverage_overlap_frac,
         )
         image_info["file_name"] = dst_name
         images.append(image_info)
         annotations.extend(anns)
         for k, v in per_class.items():
-            per_class_total[k] += v
+            per_class_total[k] = per_class_total.get(k, 0) + v
         image_id += 1
 
+    coverage_note = (
+        "coverage-ignore on" if coverage_ignore else "coverage-ignore off"
+    )
     coco = {
         "licenses": [{"name": "", "id": 0, "url": ""}],
         "info": {
@@ -1014,7 +1083,8 @@ def build_split(
             "date_created": "",
             "description": (
                 f"Boulder training split: {split_name} "
-                f"(years={sorted(years_used)}; {deposit_policy}; {small_policy})"
+                f"(years={sorted(years_used)}; {deposit_policy}; {small_policy}; "
+                f"{coverage_note})"
             ),
             "url": "",
             "version": "3.1",
@@ -1042,6 +1112,8 @@ def build_split(
         "boulders": per_class_total["boulder"],
         "deposits": per_class_total["deposit"],
         "crowd_ignore": per_class_total["crowd"],
+        "coverage_ignore": per_class_total["coverage"],
+        "coverage_overlap": per_class_total["coverage_overlap"],
         "dropped_small": per_class_total["dropped_small"],
         "dropped_deposit": per_class_total["dropped_deposit"],
         "trainable": n_pos,
@@ -1309,6 +1381,49 @@ def main() -> None:
             "the split, include all matching {{stem}}_r*_c*.tif chips."
         ),
     )
+    parser.add_argument(
+        "--coverage-ignore",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Emit iscrowd ignore for border-connected near-black RGB voids "
+            "(+ blur dilate) and DSM gaps gated to those voids (default: on). "
+            "Does not mask textured ocean. Use --no-coverage-ignore to disable."
+        ),
+    )
+    parser.add_argument(
+        "--coverage-rgb-max",
+        type=int,
+        default=8,
+        help="Near-black threshold: max(R,G,B) <= this (default 8).",
+    )
+    parser.add_argument(
+        "--coverage-blur-m",
+        type=float,
+        default=0.5,
+        help="Dilate RGB void by this many meters for soft/blur fringe (default 0.5).",
+    )
+    parser.add_argument(
+        "--coverage-min-area-m2",
+        type=float,
+        default=1.0,
+        help="Drop coverage polygons smaller than this (map m², default 1.0).",
+    )
+    parser.add_argument(
+        "--coverage-overlap-frac",
+        type=float,
+        default=0.5,
+        help=(
+            "Boulders with this fraction of area inside coverage become "
+            "iscrowd coverage_overlap (default 0.5)."
+        ),
+    )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=Path("."),
+        help="Project root containing 2024/ and 2025/ DSM files (default: .).",
+    )
     args = parser.parse_args()
 
     years = [args.year] if args.year is not None else parse_years(args.years, [24, 25])
@@ -1328,6 +1443,11 @@ def main() -> None:
             "drop_deposits": bool(args.drop_deposits),
             "split_config": str(args.split_config) if args.split_config else None,
             "expand_chips": bool(args.expand_chips),
+            "coverage_ignore": bool(args.coverage_ignore),
+            "coverage_rgb_max": int(args.coverage_rgb_max),
+            "coverage_blur_m": float(args.coverage_blur_m),
+            "coverage_min_area_m2": float(args.coverage_min_area_m2),
+            "coverage_overlap_frac": float(args.coverage_overlap_frac),
         },
     ):
         return
@@ -1456,6 +1576,36 @@ def main() -> None:
         extents_path = seg_dir / "tile_extents" / f"tile_extents_{tag}_auto.geojson"
         write_tile_extents(train_tiles + valid_tiles + test_tiles, tile_dir, extents_path)
 
+    dsm_by_year: dict[int, Path] = {}
+    if args.coverage_ignore:
+        from coverage_ignore import default_dsm_path
+
+        root = args.project_root.resolve()
+        for y in years:
+            path = default_dsm_path(root, y)
+            if path.is_file():
+                dsm_by_year[y] = path
+            else:
+                print(f"WARNING: DSM not found for year={y}: {path} (RGB-only coverage)")
+        print(
+            f"Coverage ignore: on (rgb_max={args.coverage_rgb_max}, "
+            f"blur_m={args.coverage_blur_m}, dsm_years={sorted(dsm_by_year)})"
+        )
+    else:
+        print("Coverage ignore: off")
+
+    split_kwargs = dict(
+        drop_below_min_area=args.drop_below_min_area,
+        drop_deposits=args.drop_deposits,
+        expand_chips=bool(args.expand_chips),
+        link_mode=args.link_mode,
+        coverage_ignore=bool(args.coverage_ignore),
+        dsm_by_year=dsm_by_year,
+        coverage_rgb_max=int(args.coverage_rgb_max),
+        coverage_blur_m=float(args.coverage_blur_m),
+        coverage_min_area_m2=float(args.coverage_min_area_m2),
+        coverage_overlap_frac=float(args.coverage_overlap_frac),
+    )
     summary = [
         build_split(
             "train",
@@ -1466,10 +1616,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
-            drop_below_min_area=args.drop_below_min_area,
-            drop_deposits=args.drop_deposits,
-            expand_chips=bool(args.expand_chips),
-            link_mode=args.link_mode,
+            **split_kwargs,
         ),
         build_split(
             "valid",
@@ -1480,10 +1627,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
-            drop_below_min_area=args.drop_below_min_area,
-            drop_deposits=args.drop_deposits,
-            expand_chips=bool(args.expand_chips),
-            link_mode=args.link_mode,
+            **split_kwargs,
         ),
         build_split(
             "test",
@@ -1494,10 +1638,7 @@ def main() -> None:
             roi,
             args.min_area_m2,
             args.boulder_only,
-            drop_below_min_area=args.drop_below_min_area,
-            drop_deposits=args.drop_deposits,
-            expand_chips=bool(args.expand_chips),
-            link_mode=args.link_mode,
+            **split_kwargs,
         ),
     ]
     print(json.dumps(summary, indent=2))
@@ -1538,9 +1679,18 @@ def main() -> None:
             "n_test_tiles": len(test_tiles),
             "expand_chips": bool(args.expand_chips),
             "link_mode": args.link_mode,
+            "coverage_ignore": bool(args.coverage_ignore),
+            "coverage_rgb_max": int(args.coverage_rgb_max),
+            "coverage_blur_m": float(args.coverage_blur_m),
+            "coverage_min_area_m2": float(args.coverage_min_area_m2),
+            "coverage_overlap_frac": float(args.coverage_overlap_frac),
+            "dsm_by_year": {str(k): str(v) for k, v in dsm_by_year.items()},
         },
         splits_summary=summary,
-        notes="COCO from GPKG; iscrowd/drop behavior summarized in deposits_mode / small_boulder_mode.",
+        notes=(
+            "COCO from GPKG; iscrowd/drop in deposits_mode / small_boulder_mode; "
+            "coverage_ignore masks black-edge / gated DSM gaps (not textured ocean)."
+        ),
     )
 
 

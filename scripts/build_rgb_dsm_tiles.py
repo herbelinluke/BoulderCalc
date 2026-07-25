@@ -106,10 +106,18 @@ def relief_to_uint8(
     return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
 
 
-def warp_dem_to_tile(ortho_path: Path, dsm_path: Path) -> tuple[np.ndarray, rasterio.profiles.Profile]:
+def warp_dem_to_tile(
+    ortho_path: Path, dsm_path: Path
+) -> tuple[np.ndarray, np.ndarray, rasterio.profiles.Profile]:
+    """Warp DSM onto ortho grid. Invalid / nodata / out-of-footprint → NaN.
+
+    Returns ``(dem, valid_mask, profile)``. Callers should fill only for stretch
+    math; invalid pixels are written as 0 in the uint8 band-4 output.
+    """
     with rasterio.open(ortho_path) as ortho:
-        dem = np.zeros((ortho.height, ortho.width), dtype=np.float32)
+        dem = np.full((ortho.height, ortho.width), np.nan, dtype=np.float32)
         with rasterio.open(dsm_path) as dsm:
+            src_nodata = dsm.nodata
             reproject(
                 source=rasterio.band(dsm, 1),
                 destination=dem,
@@ -118,27 +126,36 @@ def warp_dem_to_tile(ortho_path: Path, dsm_path: Path) -> tuple[np.ndarray, rast
                 dst_transform=ortho.transform,
                 dst_crs=ortho.crs,
                 resampling=Resampling.bilinear,
+                src_nodata=src_nodata,
+                dst_nodata=np.nan,
             )
-        return dem, ortho.profile.copy()
+            if src_nodata is not None and np.isfinite(src_nodata):
+                dem = np.where(np.isclose(dem, float(src_nodata)), np.nan, dem)
+        valid = np.isfinite(dem)
+        return dem, valid, ortho.profile.copy()
 
 
 def warp_dem_padded(
     ortho_path: Path,
     dsm_path: Path,
     pad_px: int,
-) -> tuple[np.ndarray, rasterio.profiles.Profile, int, int, int]:
-    """Warp DSM onto ortho grid expanded by ``pad_px`` on each side."""
+) -> tuple[np.ndarray, np.ndarray, rasterio.profiles.Profile, int, int, int]:
+    """Warp DSM onto ortho grid expanded by ``pad_px`` on each side.
+
+    Returns ``(dem, valid, profile, pad, h, w)`` with NaN invalid cells.
+    """
     pad = max(0, int(pad_px))
     with rasterio.open(ortho_path) as ortho:
         h, w = ortho.height, ortho.width
         profile = ortho.profile.copy()
         if pad == 0:
-            dem, _ = warp_dem_to_tile(ortho_path, dsm_path)
-            return dem, profile, 0, h, w
+            dem, valid, _ = warp_dem_to_tile(ortho_path, dsm_path)
+            return dem, valid, profile, 0, h, w
         new_h, new_w = h + 2 * pad, w + 2 * pad
         expanded_transform = ortho.window_transform(Window(-pad, -pad, new_w, new_h))
-        dem = np.zeros((new_h, new_w), dtype=np.float32)
+        dem = np.full((new_h, new_w), np.nan, dtype=np.float32)
         with rasterio.open(dsm_path) as dsm:
+            src_nodata = dsm.nodata
             reproject(
                 source=rasterio.band(dsm, 1),
                 destination=dem,
@@ -147,18 +164,28 @@ def warp_dem_padded(
                 dst_transform=expanded_transform,
                 dst_crs=ortho.crs,
                 resampling=Resampling.bilinear,
+                src_nodata=src_nodata,
+                dst_nodata=np.nan,
             )
-        return dem, profile, pad, h, w
+            if src_nodata is not None and np.isfinite(src_nodata):
+                dem = np.where(np.isclose(dem, float(src_nodata)), np.nan, dem)
+        valid = np.isfinite(dem)
+        return dem, valid, profile, pad, h, w
 
 
-def elevation_to_uint8(dem: np.ndarray) -> np.ndarray:
-    dem = fill_dem(dem)
-    finite = dem[np.isfinite(dem)]
+def elevation_to_uint8(dem: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray:
+    """Percentile-stretch DEM; invalid (NaN / ~valid) pixels → 0."""
+    if valid is None:
+        valid = np.isfinite(dem)
+    filled = fill_dem(dem)
+    finite = filled[valid]
     if finite.size == 0:
         return np.zeros(dem.shape, dtype=np.uint8)
     lo, hi = np.percentile(finite, [2, 98])
-    scaled = (dem - lo) / max(hi - lo, 1e-6)
-    return np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
+    scaled = (filled - lo) / max(hi - lo, 1e-6)
+    out = np.clip(scaled * 255.0, 0, 255).astype(np.uint8)
+    out = np.where(valid, out, np.uint8(0))
+    return out
 
 
 def read_rgb_uint8(ortho_path: Path) -> np.ndarray:
@@ -186,9 +213,12 @@ def build_rgb_dsm_tile(
     rgb = read_rgb_uint8(ortho_path)
 
     if dsm_mode == "elevation":
-        dem, profile = warp_dem_to_tile(ortho_path, dsm_path)
-        dsm_u8 = elevation_to_uint8(dem)
-        meta_extra = {"relief_stretch": None}
+        dem, valid, profile = warp_dem_to_tile(ortho_path, dsm_path)
+        dsm_u8 = elevation_to_uint8(dem, valid)
+        meta_extra = {
+            "relief_stretch": None,
+            "dsm_valid_fraction": float(np.count_nonzero(valid) / max(valid.size, 1)),
+        }
     elif dsm_mode == "local_relief":
         with rasterio.open(ortho_path) as ortho:
             pixel_size = abs(ortho.transform.a)
@@ -200,11 +230,14 @@ def build_rgb_dsm_tile(
         ctx_m = float(relief_context_buffer_m) if relief_context_buffer_m is not None else 0.0
         pad_m = max(gauss_buf_m, pct_buf_m, ctx_m)
         pad_px = int(math.ceil(pad_m / max(pixel_size, 1e-6)))
-        dem_pad, profile, pad, h, w = warp_dem_padded(ortho_path, dsm_path, pad_px)
+        dem_pad, valid_pad, profile, pad, h, w = warp_dem_padded(
+            ortho_path, dsm_path, pad_px
+        )
         relief_pad = compute_local_relief(
             dem_pad, pixel_size=pixel_size, radius_m=relief_radius_m
         )
         relief = relief_pad[pad : pad + h, pad : pad + w]
+        valid = valid_pad[pad : pad + h, pad : pad + w]
         dsm_u8 = relief_to_uint8(
             relief,
             stretch=relief_stretch,
@@ -212,12 +245,14 @@ def build_rgb_dsm_tile(
             positive_only=relief_positive_only,
             stats_relief=relief_pad if relief_stretch == "percentile" else None,
         )
+        dsm_u8 = np.where(valid, dsm_u8, np.uint8(0))
         meta_extra = {
             "relief_stretch": relief_stretch,
             "relief_clip_m": relief_clip_m,
             "relief_positive_only": relief_positive_only,
             "relief_pad_m": pad_m,
             "relief_pad_px": pad_px,
+            "dsm_valid_fraction": float(np.count_nonzero(valid) / max(valid.size, 1)),
         }
     else:
         raise ValueError(f"Unknown dsm_mode: {dsm_mode}")

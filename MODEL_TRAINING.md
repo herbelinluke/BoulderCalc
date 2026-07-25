@@ -124,6 +124,21 @@ iscrowd small only → `--drop-deposits --min-area-m2 1.0`; iscrowd deposits onl
 `--boulder-only --drop-below-min-area --min-area-m2 1.0`; iscrowd both →
 `--boulder-only --min-area-m2 1.0` (default deposit handling).
 
+**Coverage ignore** (default **on** for train/valid/test): border-connected
+near-black RGB voids (true mosaic empty / soft edge after a small dilate) and
+DSM nodata **gated** to those voids become `iscrowd` ignore regions. Textured
+ocean and partially submerged boulders are not wiped — only empty edge
+coverage. Boulders with ≥50% of their area inside the void are marked
+`coverage_overlap` (also `iscrowd`). Disable with `--no-coverage-ignore`.
+Rebuild COCO (`--force` when skip-existing is active) after changing these
+knobs. Debug one tile:
+
+```bash
+python BoulderCalculator/scripts/coverage_ignore.py \
+  --image segmentation/tiling/25/25IniSouthOrt_01_01.tif --year 25 \
+  --output /tmp/coverage_debug.png
+```
+
 Useful flags: `--gpkg a.gpkg:24,b.gpkg:25` (override annotations),
 `--roi path` (re‑enable ROI clipping; off by default), `--tiles-used path`,
 `--years 24` or `--years 25` (single year),
@@ -367,7 +382,10 @@ Defaults in parentheses. Run any script with `--help` for the authoritative list
 `--drop-deposits` (omit deposits instead of iscrowd/trainable),
 `--boulder-only`/`--no-boulder-only` (on), `--layer`, `--class-field` (Class),
 `--train-tiles`/`--valid-tiles`/`--test-tiles`,
-`--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline).
+`--split-config` (YAML/JSON geographic hold-outs; default = baked-in baseline),
+`--coverage-ignore`/`--no-coverage-ignore` (on), `--coverage-rgb-max` (8),
+`--coverage-blur-m` (0.5), `--coverage-min-area-m2` (1.0),
+`--coverage-overlap-frac` (0.5).
 
 **`scripts/augment_coco_dataset.py`** — offline split aug.
 `--input-dir`*, `--output-dir`*, `--variants` (full dihedral 8×), `--jitter`
@@ -386,7 +404,12 @@ guest friendly, no extra disk).
 
 **`scripts/build_coco_rgb_dsm.py`** — COCO from 4‑band tiles.
 `--source-coco` (segmentation/coco_dataset), `--tile-dirs`* (nargs+),
-`--output-dir` (segmentation/coco_dataset_rgb_dsm).
+`--output-dir` (segmentation/coco_dataset_rgb_dsm),
+`--coverage-ignore`/`--no-coverage-ignore` (on; refreshes iscrowd voids on
+4-band images using RGB + year DSM nodata).
+
+**`scripts/coverage_ignore.py`** — debug one-tile coverage mask PNG/TIF.
+`--image`*, `--year` / `--dsm`, `--output`*, `--rgb-max`, `--blur-m`.
 
 **`scripts/train_boulder_local.py`** — see [§9](#9-training-controls).
 

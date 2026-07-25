@@ -19,6 +19,11 @@ setups × selected modalities.
 
 **Modalities:** `rgb`, `rgb_dsm` (absolute elevation stretch), `rgb_local_relief`.
 
+**Coverage ignore** (via `gpkg_to_coco` / `build_coco_rgb_dsm`, default on):
+border-connected near-black mosaic voids (+ blur dilate) and DSM gaps gated to
+those voids → `iscrowd` on train/valid/test. Does not mask textured ocean.
+Rebuild COCO with `--force` after pulling this change.
+
 ### Local-relief encoding
 
 Computed on **padded parents** (not on 512 chips alone), then window-cropped:
