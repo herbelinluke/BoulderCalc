@@ -7,12 +7,17 @@ Band order:
 
 DSM scaling modes:
   elevation     per-tile 2–98 percentile stretch of absolute elevation (default)
-  local_relief  DSM minus Gaussian-smoothed DSM, then fixed-meter or buffered
+  local_relief  DSM minus a background estimate, then fixed-meter or buffered
                 percentile stretch (see --relief-stretch)
 
-Local-relief context: Gaussian (and optional percentile stats) run on a DEM
-window padded beyond the 2000×2000 parent so cliffs/flat tiles do not dominate
-a tiny per-tile stretch and filter edge effects are reduced.
+Local-relief background (``--relief-background``):
+  gaussian  scipy gaussian_filter; ``--relief-radius-m`` is sigma in meters
+  opening   morphological grey opening (square SE); ``--relief-opening-se-m``
+            is SE side length in meters (default). Chosen after dense-deposit
+            study under segmentation/relief_opening_study/.
+
+Local-relief is always computed on a DEM window padded beyond the 2000×2000
+parent (kernel footprint + optional context buffer), then cropped.
 
 Run from the project root (directory that contains ``segmentation/`` and
 ``2024/`` / ``2025/``). Paths are relative so the same commands work on
@@ -37,7 +42,7 @@ import numpy as np
 import rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.windows import Window
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, grey_opening
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,6 +51,11 @@ from skip_existing import add_force_argument, should_skip_file  # noqa: E402
 
 
 def fill_dem(dem: np.ndarray) -> np.ndarray:
+    """Replace non-finite cells with nanmedian so filters never see NaN/sentinels.
+
+    Callers must still zero invalid pixels after encoding using the pre-fill
+    validity mask — fill is only for neighborhood operators.
+    """
     dem = dem.astype(np.float32)
     if not np.any(np.isfinite(dem)):
         return np.zeros_like(dem, dtype=np.float32)
@@ -53,15 +63,54 @@ def fill_dem(dem: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(dem), dem, fill)
 
 
+def relief_background_pad_m(
+    *,
+    background: str,
+    radius_m: float,
+    opening_se_m: float,
+    context_buffer_m: float | None,
+    percentile_buffer_m: float,
+    relief_stretch: str,
+) -> float:
+    """DEM pad beyond parent for the chosen background operator + optional extras."""
+    if background == "gaussian":
+        # ~3σ captures most of the Gaussian kernel mass.
+        kernel_m = 3.0 * float(radius_m)
+    elif background == "opening":
+        # Square SE needs half-side + small safety margin on each edge.
+        kernel_m = 0.5 * float(opening_se_m) + 5.0
+    else:
+        raise ValueError(f"Unknown relief background: {background}")
+    pct_m = float(percentile_buffer_m) if relief_stretch == "percentile" else 0.0
+    ctx_m = float(context_buffer_m) if context_buffer_m is not None else 0.0
+    return max(kernel_m, pct_m, ctx_m)
+
+
 def compute_local_relief(
     dem: np.ndarray,
     pixel_size: float,
+    *,
+    background: str = "opening",
     radius_m: float = 10.0,
+    opening_se_m: float = 5.0,
 ) -> np.ndarray:
+    """DEM minus background. ``radius_m`` is Gaussian sigma (meters).
+
+    ``opening_se_m`` is morphological opening square SE side length (meters).
+    NoData must already be NaN; this fills with nanmedian before filtering.
+    """
     dem = fill_dem(dem)
-    sigma_px = max(1.0, radius_m / pixel_size)
-    smooth = gaussian_filter(dem, sigma=sigma_px)
-    return dem - smooth
+    if background == "gaussian":
+        sigma_px = max(1.0, float(radius_m) / max(pixel_size, 1e-9))
+        smooth = gaussian_filter(dem, sigma=sigma_px)
+        return dem - smooth
+    if background == "opening":
+        side_px = max(3, int(round(float(opening_se_m) / max(pixel_size, 1e-9))))
+        if side_px % 2 == 0:
+            side_px += 1
+        bg = grey_opening(dem, size=(side_px, side_px))
+        return dem - bg
+    raise ValueError(f"Unknown relief background: {background}")
 
 
 def relief_to_uint8(
@@ -208,6 +257,8 @@ def build_rgb_dsm_tile(
     relief_positive_only: bool = True,
     relief_context_buffer_m: float | None = None,
     relief_percentile_buffer_m: float = 60.0,
+    relief_background: str = "opening",
+    relief_opening_se_m: float = 5.0,
 ) -> dict:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rgb = read_rgb_uint8(ortho_path)
@@ -222,19 +273,24 @@ def build_rgb_dsm_tile(
     elif dsm_mode == "local_relief":
         with rasterio.open(ortho_path) as ortho:
             pixel_size = abs(ortho.transform.a)
-        # Pad enough for Gaussian (~3σ) and optional percentile context.
-        gauss_buf_m = 3.0 * float(relief_radius_m)
-        pct_buf_m = (
-            float(relief_percentile_buffer_m) if relief_stretch == "percentile" else 0.0
+        pad_m = relief_background_pad_m(
+            background=relief_background,
+            radius_m=relief_radius_m,
+            opening_se_m=relief_opening_se_m,
+            context_buffer_m=relief_context_buffer_m,
+            percentile_buffer_m=relief_percentile_buffer_m,
+            relief_stretch=relief_stretch,
         )
-        ctx_m = float(relief_context_buffer_m) if relief_context_buffer_m is not None else 0.0
-        pad_m = max(gauss_buf_m, pct_buf_m, ctx_m)
         pad_px = int(math.ceil(pad_m / max(pixel_size, 1e-6)))
         dem_pad, valid_pad, profile, pad, h, w = warp_dem_padded(
             ortho_path, dsm_path, pad_px
         )
         relief_pad = compute_local_relief(
-            dem_pad, pixel_size=pixel_size, radius_m=relief_radius_m
+            dem_pad,
+            pixel_size=pixel_size,
+            background=relief_background,
+            radius_m=relief_radius_m,
+            opening_se_m=relief_opening_se_m,
         )
         relief = relief_pad[pad : pad + h, pad : pad + w]
         valid = valid_pad[pad : pad + h, pad : pad + w]
@@ -250,6 +306,9 @@ def build_rgb_dsm_tile(
             "relief_stretch": relief_stretch,
             "relief_clip_m": relief_clip_m,
             "relief_positive_only": relief_positive_only,
+            "relief_background": relief_background,
+            "relief_radius_m": relief_radius_m,
+            "relief_opening_se_m": relief_opening_se_m,
             "relief_pad_m": pad_m,
             "relief_pad_px": pad_px,
             "dsm_valid_fraction": float(np.count_nonzero(valid) / max(valid.size, 1)),
@@ -266,8 +325,13 @@ def build_rgb_dsm_tile(
     profile.pop("photometric", None)
     band4_desc = f"dsm_{dsm_mode}"
     if dsm_mode == "local_relief":
+        bg_tag = (
+            f"open{relief_opening_se_m:g}"
+            if relief_background == "opening"
+            else f"gauss{relief_radius_m:g}"
+        )
         band4_desc = (
-            f"dsm_local_relief_{relief_stretch}"
+            f"dsm_local_relief_{bg_tag}_{relief_stretch}"
             f"{'_pos' if relief_positive_only else ''}"
         )
     with rasterio.open(output_path, "w", **profile) as out:
@@ -384,10 +448,32 @@ def main() -> None:
         help="If set, only build tiles referenced by this COCO dataset dir for --year.",
     )
     parser.add_argument(
+        "--relief-background",
+        choices=["opening", "gaussian"],
+        default="opening",
+        help=(
+            "local_relief background estimator (default: opening). "
+            "opening = morphological grey opening; gaussian = gaussian_filter. "
+            "Gaussian path retained for A/B; opening default from dense-deposit study."
+        ),
+    )
+    parser.add_argument(
         "--relief-radius-m",
         type=float,
         default=10.0,
-        help="Gaussian radius (m) for local_relief mode (default 10).",
+        help=(
+            "Gaussian SIGMA in meters when --relief-background gaussian "
+            "(default 10). Not used for opening."
+        ),
+    )
+    parser.add_argument(
+        "--relief-opening-se-m",
+        type=float,
+        default=5.0,
+        help=(
+            "Opening square SE side length in meters when --relief-background "
+            "opening (default 5). Study also evaluated 8 m (stronger dense signal)."
+        ),
     )
     parser.add_argument(
         "--relief-stretch",
@@ -415,8 +501,8 @@ def main() -> None:
         type=float,
         default=None,
         help=(
-            "Extra DEM pad (m) beyond auto Gaussian pad (~3× radius). "
-            "Default: none (auto pad only)."
+            "Extra DEM pad (m) beyond auto kernel pad "
+            "(gaussian ~3×sigma, opening ~0.5×SE+5 m). Default: none (auto pad only)."
         ),
     )
     parser.add_argument(
@@ -425,7 +511,7 @@ def main() -> None:
         default=60.0,
         help=(
             "When --relief-stretch percentile: DEM/stats pad in meters beyond the "
-            "parent tile (default 60). Also enlarges Gaussian context."
+            "parent tile (default 60). Also enlarges filter context."
         ),
     )
     add_force_argument(parser)
@@ -481,6 +567,8 @@ def main() -> None:
                 relief_positive_only=bool(args.relief_positive_only),
                 relief_context_buffer_m=args.relief_context_buffer_m,
                 relief_percentile_buffer_m=args.relief_percentile_buffer_m,
+                relief_background=args.relief_background,
+                relief_opening_se_m=args.relief_opening_se_m,
             )
         )
         n_built += 1
@@ -496,6 +584,8 @@ def main() -> None:
                 "force": bool(args.force),
                 "dsm_mode": args.dsm_mode,
                 "relief_stretch": args.relief_stretch if args.dsm_mode == "local_relief" else None,
+                "relief_background": args.relief_background if args.dsm_mode == "local_relief" else None,
+                "relief_opening_se_m": args.relief_opening_se_m if args.dsm_mode == "local_relief" else None,
                 "output_dir": str(args.output_dir),
                 "manifest": str(manifest),
             },
@@ -515,7 +605,9 @@ def main() -> None:
             "dsm": str(args.dsm),
             "ortho_dir": str(args.ortho_dir),
             "dsm_mode": args.dsm_mode,
+            "relief_background": args.relief_background,
             "relief_radius_m": args.relief_radius_m,
+            "relief_opening_se_m": args.relief_opening_se_m,
             "relief_stretch": args.relief_stretch,
             "relief_clip_m": args.relief_clip_m,
             "relief_positive_only": bool(args.relief_positive_only),

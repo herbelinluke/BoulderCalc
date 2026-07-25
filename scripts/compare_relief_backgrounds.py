@@ -129,10 +129,16 @@ def relief_gaussian(dem_filled: np.ndarray, pixel_size: float, sigma_m: float) -
 
 
 def relief_opening(dem_filled: np.ndarray, pixel_size: float, se_diam_m: float) -> np.ndarray:
-    """Background = grey opening with disk of given diameter (meters)."""
-    radius_px = max(1, int(round((se_diam_m / 2.0) / pixel_size)))
-    fp = disk_footprint(radius_px)
-    bg = grey_opening(dem_filled, footprint=fp)
+    """Background = grey opening with flat square SE of given side length (meters).
+
+    Square ``size=`` is used (not a disk footprint) so scipy can run the
+    separable morphology path — disk footprints at multi-metre SE on 2k tiles
+    are impractically slow for this study.
+    """
+    side_px = max(3, int(round(se_diam_m / pixel_size)))
+    if side_px % 2 == 0:
+        side_px += 1
+    bg = grey_opening(dem_filled, size=(side_px, side_px))
     return dem_filled - bg
 
 
@@ -220,8 +226,12 @@ def main() -> None:
     for se in OPENING_SE_M:
         methods.append((f"opening_se_m", se, "opening"))
 
-    # Max pad: opening needs ~SE radius; gaussian needs ~3σ
-    max_pad_m = max(3.0 * GAUSS_SIGMA_M, max(OPENING_SE_M) / 2.0 + 5.0, 60.0)
+    # Pad: Gaussian needs ~3σ; opening needs ~half SE + small margin.
+    # Cap at 60 m for this study (same production default context).
+    max_pad_m = min(
+        60.0,
+        max(3.0 * GAUSS_SIGMA_M, max(OPENING_SE_M) / 2.0 + 5.0),
+    )
 
     boulder_rows = []
     control_rows = []

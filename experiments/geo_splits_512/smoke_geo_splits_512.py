@@ -6,8 +6,8 @@ shared hard-linked COCO pools with offline 8×+jitter, materializes each geo
 setup, and trains with ``--image-size 512 --batch-size 4 --no-rich-aug``.
 
 Local-relief band 4 defaults (see build_rgb_dsm_tiles.py):
-  fixed 0.5 m positive-only clip, Gaussian radius 10 m, DEM padded ~60 m
-  beyond the parent (not a per-tile 2–98% stretch).
+  fixed 0.5 m positive-only clip, morphological opening SE 5 m,
+  optional 60 m context pad (not a per-tile 2–98% stretch).
 
 Windows guest defaults: ``--link-mode hard`` everywhere, skip-existing unless
 ``--force``. Reuses existing geo_splits/*.yaml (parent-level membership; chips
@@ -60,7 +60,10 @@ TILE_LR_24 = "tiling_512_rgb_dsm_local_relief_24"
 TILE_LR_25 = "tiling_512_rgb_dsm_local_relief_25"
 
 # Local-relief encoding (computed on padded parents, then chipped).
-RELIEF_RADIUS_M = 10.0
+# Background default = morphological opening (see relief_opening_study/).
+RELIEF_BACKGROUND = "opening"
+RELIEF_OPENING_SE_M = 5.0
+RELIEF_RADIUS_M = 10.0  # gaussian sigma if RELIEF_BACKGROUND=gaussian
 RELIEF_CLIP_M = 0.5
 RELIEF_STRETCH = "fixed"
 RELIEF_CONTEXT_BUFFER_M = 60.0
@@ -108,6 +111,10 @@ def ensure_parent_rgb_dsm(
         if dsm_mode == "local_relief":
             cmd.extend(
                 [
+                    "--relief-background",
+                    RELIEF_BACKGROUND,
+                    "--relief-opening-se-m",
+                    str(RELIEF_OPENING_SE_M),
                     "--relief-radius-m",
                     str(RELIEF_RADIUS_M),
                     "--relief-stretch",

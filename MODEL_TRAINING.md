@@ -400,7 +400,10 @@ guest friendly, no extra disk).
 **`scripts/build_rgb_dsm_tiles.py`** — warp DSM onto ortho tiles.
 `--year`* (24|25), `--dsm` (year default), `--ortho-dir` (segmentation/tiling),
 `--output-dir` (auto), `--dsm-mode` (elevation|local_relief),
-`--relief-radius-m` (10.0), `--tile-keys`, `--from-coco`.
+`--relief-background` (opening|gaussian; default opening),
+`--relief-opening-se-m` (5.0), `--relief-radius-m` (10.0, gaussian sigma),
+`--relief-stretch` (fixed), `--relief-clip-m` (0.5), `--tile-keys`, `--from-coco`.
+Study notes: `segmentation/relief_opening_study/comparison.md`.
 
 **`scripts/build_coco_rgb_dsm.py`** — COCO from 4‑band tiles.
 `--source-coco` (segmentation/coco_dataset), `--tile-dirs`* (nargs+),

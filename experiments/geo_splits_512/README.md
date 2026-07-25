@@ -32,10 +32,14 @@ Computed on **padded parents** (not on 512 chips alone), then window-cropped:
 |---------|---------|
 | Stretch | **fixed** meter clip (not per-tile 2–98%) |
 | Clip | **0.5 m**, positive-only (boulder-up residual) |
-| Gaussian radius | **10 m** |
-| DEM context pad | **60 m** beyond parent (~3σ Gaussian + cliff/flat buffer) |
+| Background | **morphological opening**, SE **5 m** (square) |
+| Gaussian (alt) | `--relief-background gaussian --relief-radius-m 10` (sigma) |
+| DEM context pad | auto from kernel + optional `--relief-context-buffer-m` (runner uses **60 m**) |
 
-Percentile stretch is still available via `build_rgb_dsm_tiles.py --relief-stretch percentile` (stats from the padded window). Rebuild parents with `--force` if you change these knobs.
+Opening default comes from `segmentation/relief_opening_study/` (dense-deposit
+centroids recover more relief than the old 10 m Gaussian without worsening
+natural-terrain false relief). Rebuild parents with `--force` after changing
+knobs.
 
 Reuses parent-level YAMLs under [`../geo_splits/`](../geo_splits/) — chips inherit
 their parent tile’s train/valid/test membership.
