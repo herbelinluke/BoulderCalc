@@ -935,3 +935,200 @@ def plot_learning_curves(
     ax.legend()
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Whole-split COCO eval (overall + size buckets)
+# ---------------------------------------------------------------------------
+
+
+def _preds_to_coco_dt(
+    gt_coco: dict[str, Any],
+    predictions_by_stem: dict[str, list[dict[str, Any]]],
+    *,
+    merge_iou: float | None = None,
+) -> list[dict[str, Any]]:
+    """Flatten per-stem predictions into a COCO results list keyed by image id."""
+    dt: list[dict[str, Any]] = []
+    next_id = 1
+    for img in gt_coco.get("images", []):
+        stem = Path(img["file_name"]).stem
+        preds = list(predictions_by_stem.get(stem, []))
+        if merge_iou is not None and preds:
+            preds = nms_detections(preds, iou_thresh=merge_iou)
+        for ann in preds:
+            bbox = list(map(float, ann["bbox"]))
+            if ann.get("bbox_format") == "xyxy" or ann.get("source") == "inference_summary":
+                x1, y1, x2, y2 = bbox
+                bbox = [x1, y1, max(0.0, x2 - x1), max(0.0, y2 - y1)]
+            dt.append(
+                {
+                    "id": next_id,
+                    "image_id": int(img["id"]),
+                    "category_id": int(ann.get("category_id", 1)),
+                    "bbox": bbox,
+                    "score": float(ann.get("score", 1.0)),
+                    "area": float(ann.get("area", max(0.0, bbox[2] * bbox[3]))),
+                }
+            )
+            next_id += 1
+    return dt
+
+
+def _stats_to_metric_dict(stats: Any) -> dict[str, float]:
+    nan = float("nan")
+    out: dict[str, float] = {}
+    for idx, name in enumerate(_METRIC_KEYS):
+        if stats is None or idx >= len(stats):
+            out[name] = nan
+            continue
+        val = float(stats[idx])
+        out[name] = val * 100.0 if np.isfinite(val) and val >= 0 else nan
+    return out
+
+
+def evaluate_coco_split_overall(
+    gt_coco: dict[str, Any],
+    predictions_by_stem: dict[str, list[dict[str, Any]]],
+    *,
+    iou_type: str = "bbox",
+    merge_iou: float | None = None,
+    area_rng: list[list[float]] | None = None,
+    area_rng_lbl: list[str] | None = None,
+) -> dict[str, float]:
+    """Whole-split COCOeval AP/AR (0–100). Optional custom ``areaRng`` for buckets.
+
+    Default ``areaRng`` is COCO pixel thresholds. Pass ground-m² thresholds (and
+    a GT dict whose ``area`` fields are in m²) for ground-area buckets.
+    """
+    from pycocotools.coco import COCO
+    from pycocotools.cocoeval import COCOeval
+    import io
+    from contextlib import redirect_stdout
+
+    nan = float("nan")
+    empty = {k: nan for k in _METRIC_KEYS}
+    trainable = [a for a in gt_coco.get("annotations", []) if not a.get("iscrowd", 0)]
+    if not trainable:
+        return empty
+
+    # Ensure categories exist.
+    gt = {
+        "info": gt_coco.get("info", {}),
+        "licenses": gt_coco.get("licenses", []),
+        "images": gt_coco.get("images", []),
+        "annotations": gt_coco.get("annotations", []),
+        "categories": gt_coco.get("categories")
+        or [{"id": 1, "name": "Boulder"}],
+    }
+    dt = _preds_to_coco_dt(gt_coco, predictions_by_stem, merge_iou=merge_iou)
+    if not dt:
+        return {k: 0.0 for k in _METRIC_KEYS}
+
+    with redirect_stdout(io.StringIO()):
+        coco_gt = COCO()
+        coco_gt.dataset = gt
+        coco_gt.createIndex()
+        coco_dt = coco_gt.loadRes(dt)
+        ev = COCOeval(coco_gt, coco_dt, iou_type)
+        if area_rng is not None:
+            ev.params.areaRng = area_rng
+            ev.params.areaRngLbl = area_rng_lbl or ["all", "small", "medium", "large"]
+        ev.evaluate()
+        ev.accumulate()
+        ev.summarize()
+    return _stats_to_metric_dict(ev.stats)
+
+
+def evaluate_coco_split_dual_buckets(
+    gt_coco: dict[str, Any],
+    predictions_by_stem: dict[str, list[dict[str, Any]]],
+    *,
+    gsd_m: float,
+    image_size: int | None = None,
+    iou_type: str = "bbox",
+    merge_iou: float | None = None,
+) -> dict[str, Any]:
+    """Overall AP/AR with pixel-area (primary COCO) and ground-m² size buckets.
+
+    Ground-area is the primary size-bucket view for the tiling confound study;
+    pixel-area is logged for comparison.
+    """
+    from geo_split_run_index import (
+        COCO_AREA_M,
+        COCO_AREA_S,
+        ground_area_thresholds_m2,
+        rewrite_areas_for_ground_eval,
+        scale_annotation_areas_for_resize,
+    )
+
+    # Pixel buckets at native tile resolution (stock COCO).
+    metrics_pixel_native = evaluate_coco_split_overall(
+        gt_coco,
+        predictions_by_stem,
+        iou_type=iou_type,
+        merge_iou=merge_iou,
+    )
+
+    # Pixel buckets after network resize (if image_size given and tiles differ).
+    metrics_pixel_resized = metrics_pixel_native
+    if image_size is not None:
+        sample = (gt_coco.get("images") or [{}])[0]
+        tw = int(sample.get("width") or image_size)
+        th = int(sample.get("height") or image_size)
+        if min(tw, th) != image_size:
+            gt_r = scale_annotation_areas_for_resize(gt_coco, image_size)
+            # Predictions are already in native tile coords from the model when
+            # INPUT.MIN/MAX_SIZE_TEST == tile size; only scale GT areas for
+            # bucket assignment when comparing resized-pixel convention.
+            # When model runs at image_size==tile, native == resized.
+            metrics_pixel_resized = evaluate_coco_split_overall(
+                gt_r,
+                predictions_by_stem,
+                iou_type=iou_type,
+                merge_iou=merge_iou,
+            )
+
+    t_s, t_m = ground_area_thresholds_m2(gsd_m)
+    # COCOeval areaRng: [all, small, medium, large]
+    area_rng_m2 = [
+        [0.0, 1e10],
+        [0.0, t_s],
+        [t_s, t_m],
+        [t_m, 1e10],
+    ]
+    gt_m2 = rewrite_areas_for_ground_eval(gt_coco, gsd_m)
+    # Scale prediction areas to m² so dt areaRng filters match GT units.
+    preds_m2: dict[str, list[dict[str, Any]]] = {}
+    gsd2 = gsd_m * gsd_m
+    for stem, dets in predictions_by_stem.items():
+        scaled = []
+        for d in dets:
+            item = dict(d)
+            bbox = list(map(float, item.get("bbox") or [0, 0, 0, 0]))
+            if item.get("bbox_format") == "xyxy":
+                area_px = max(0.0, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+            else:
+                area_px = float(item.get("area") or max(0.0, bbox[2] * bbox[3]))
+            item["area"] = area_px * gsd2
+            scaled.append(item)
+        preds_m2[stem] = scaled
+    metrics_ground = evaluate_coco_split_overall(
+        gt_m2,
+        preds_m2,
+        iou_type=iou_type,
+        merge_iou=merge_iou,
+        area_rng=area_rng_m2,
+        area_rng_lbl=["all", "small", "medium", "large"],
+    )
+
+    return {
+        "overall_pixel_native": metrics_pixel_native,
+        "overall_pixel_resized": metrics_pixel_resized,
+        "overall_ground_m2": metrics_ground,
+        "primary_size_bucket": "ground_m2",
+        "ground_area_thresholds_m2": {"small_lt": t_s, "medium_lt": t_m},
+        "coco_pixel_thresholds": {"small_lt": COCO_AREA_S, "medium_lt": COCO_AREA_M},
+        "gsd_m": gsd_m,
+        "image_size": image_size,
+    }

@@ -529,12 +529,98 @@ def main() -> None:
         return
 
     # Point TEST at boulder_valid for the post-train eval (may already be set).
+    # NOTE: this uses weights left in memory after training (final/early-stop
+    # iterate), NOT necessarily model_best.pth. Periodic val logging during
+    # training is unchanged. Held-out test metrics are written separately below.
     cfg.DATASETS.TEST = ("boulder_valid",)
     evaluator = BoulderTrainer.build_evaluator(cfg, "boulder_valid")
     eval_results = trainer.test(cfg, trainer.model, evaluators=[evaluator])
     (args.output_dir / "metrics_valid.json").write_text(json.dumps(eval_results, indent=2))
     print("Validation metrics:", json.dumps(eval_results, indent=2))
     update_training_metrics(args.output_dir, eval_results)
+
+    # --- Held-out TEST (distinct from val; never mixed into metrics.json curves) ---
+    # Confirm boulder_test was registered from testing_annotations.json (geo splits
+    # keep valid≠test tile lists). Prefer model_best.pth when early-stopping saved it.
+    best_ckpt = args.output_dir / "model_best.pth"
+    ckpt_for_test = best_ckpt if best_ckpt.is_file() else None
+    if ckpt_for_test is not None:
+        print(f"Loading best checkpoint for test eval: {ckpt_for_test}")
+        trainer.checkpointer.load(str(ckpt_for_test))
+    else:
+        print(
+            "No model_best.pth; evaluating current weights on held-out test "
+            "(same as post-train valid weights)."
+        )
+
+    test_ann = args.dataset_dir / "testing_annotations.json"
+    valid_ann = args.dataset_dir / "validation_annotations.json"
+    if not test_ann.is_file():
+        print(f"Skipping metrics_test.json — missing {test_ann}")
+        return
+
+    # Soft check that test ≠ valid (same file contents would invalidate the gap).
+    try:
+        import hashlib
+
+        def _sha(p: Path) -> str:
+            return hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+
+        if valid_ann.is_file() and _sha(test_ann) == _sha(valid_ann):
+            print(
+                "WARNING: testing_annotations.json and validation_annotations.json "
+                "are identical — test metrics are NOT a true hold-out."
+            )
+    except OSError:
+        pass
+
+    cfg.DATASETS.TEST = ("boulder_test",)
+    test_eval_dir = args.output_dir / "eval_test"
+    test_evaluator = BoulderTrainer.build_evaluator(
+        cfg, "boulder_test", output_folder=str(test_eval_dir)
+    )
+    test_results = trainer.test(cfg, trainer.model, evaluators=[test_evaluator])
+    test_payload = {
+        "label": "test",
+        "checkpoint": str(ckpt_for_test) if ckpt_for_test else "in_memory_final",
+        "dataset": "boulder_test",
+        "annotation_file": str(test_ann),
+        "metrics": test_results,
+    }
+    (args.output_dir / "metrics_test.json").write_text(
+        json.dumps(test_payload, indent=2) + "\n"
+    )
+    print("TEST metrics (held-out):", json.dumps(test_payload, indent=2))
+
+    # Optional: val at the same best checkpoint for an apples-to-apples gap.
+    valid_at_best = None
+    if ckpt_for_test is not None:
+        cfg.DATASETS.TEST = ("boulder_valid",)
+        vab_dir = args.output_dir / "eval_valid_at_best"
+        vab_eval = BoulderTrainer.build_evaluator(
+            cfg, "boulder_valid", output_folder=str(vab_dir)
+        )
+        valid_at_best = trainer.test(cfg, trainer.model, evaluators=[vab_eval])
+        vab_payload = {
+            "label": "valid_at_best",
+            "checkpoint": str(ckpt_for_test),
+            "dataset": "boulder_valid",
+            "metrics": valid_at_best,
+        }
+        (args.output_dir / "metrics_valid_at_best.json").write_text(
+            json.dumps(vab_payload, indent=2) + "\n"
+        )
+        print("Validation-at-best metrics:", json.dumps(vab_payload, indent=2))
+
+    update_training_metrics(
+        args.output_dir,
+        metrics_test=test_payload,
+        metrics_valid_at_best=(
+            {"label": "valid_at_best", "checkpoint": str(ckpt_for_test), "metrics": valid_at_best}
+            if valid_at_best is not None
+            else None
+        ),
+    )
 
 
 if __name__ == "__main__":

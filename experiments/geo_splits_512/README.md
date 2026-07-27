@@ -69,6 +69,8 @@ Or `smoke_geo_splits_512.bat`. Prefer one setup first:
 python BoulderCalculator\experiments\geo_splits_512\smoke_geo_splits_512.py --mode smoke --device cuda --setups baseline --modalities rgb
 ```
 
+**Tiling-confound diagnostics** (dataset stats, batch eval, transfer package):
+see [`DIAGNOSTICS.md`](DIAGNOSTICS.md).
 Local-relief smoke:
 
 ```bat

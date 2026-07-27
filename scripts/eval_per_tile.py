@@ -287,9 +287,23 @@ def _resolve_image_dirs(args, gt_path: Path, split_name: str) -> list[Path]:
     return image_dirs
 
 
-def _run_one_split(args, split_name: str, out_dir: Path) -> list[dict]:
+def run_per_tile_evaluation(
+    args,
+    split_name: str,
+    out_dir: Path,
+    *,
+    overall_metrics: bool = False,
+    gsd_m: float | None = None,
+    image_size_for_buckets: int | None = None,
+) -> tuple[list[dict], dict]:
+    """Core per-tile (+ optional whole-split) evaluation. Importable by batch drivers.
+
+    Returns ``(per_tile_rows, extras)`` where ``extras`` may contain
+    ``overall_dual_buckets`` when ``overall_metrics`` is True.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n=== Split: {split_name} → {out_dir} ===")
+    extras: dict = {}
 
     try:
         gt_path = resolve_gt_annotations(args.dataset_dir, split_name, args.gt_json)
@@ -474,6 +488,50 @@ def _run_one_split(args, split_name: str, out_dir: Path) -> list[dict]:
             )
         print(f"Wrote {diff_path}")
 
+    if overall_metrics:
+        from eval_utils import evaluate_coco_split_dual_buckets
+        from geo_split_run_index import DEFAULT_GSD_M, read_gsd_m, resolve_split_image
+
+        gsd = gsd_m
+        gsd_src = "cli"
+        if gsd is None:
+            gsd = DEFAULT_GSD_M
+            gsd_src = "default_fallback"
+            if args.dataset_dir is not None and gt_coco.get("images"):
+                fn = gt_coco["images"][0]["file_name"]
+                img_path = resolve_split_image(Path(args.dataset_dir), split_name, fn)
+                if img_path is None and image_dirs:
+                    from eval_utils import resolve_image_file
+
+                    img_path = resolve_image_file(fn, image_dirs)
+                if img_path is not None:
+                    gsd, gsd_src = read_gsd_m(img_path)
+        img_size = image_size_for_buckets
+        if img_size is None:
+            img_size = int(getattr(args, "image_size", 0) or 0) or None
+        dual = evaluate_coco_split_dual_buckets(
+            gt_coco,
+            preds_by_stem,
+            gsd_m=float(gsd),
+            image_size=img_size,
+            iou_type=args.iou_type,
+            merge_iou=args.merge_iou,
+        )
+        dual["gsd_source"] = gsd_src
+        extras["overall_dual_buckets"] = dual
+        overall_path = out_dir / "overall_metrics.json"
+        overall_path.write_text(json.dumps(dual, indent=2) + "\n")
+        print(f"Wrote {overall_path}")
+        g = dual["overall_ground_m2"]
+        print(
+            f"Overall (ground-m² buckets primary): "
+            f"AP={g.get('AP', float('nan')):.2f} "
+            f"AP50={g.get('AP50', float('nan')):.2f} "
+            f"AR100={g.get('AR100', float('nan')):.2f} "
+            f"ARs/m/l={g.get('ARs', float('nan')):.1f}/"
+            f"{g.get('ARm', float('nan')):.1f}/{g.get('ARl', float('nan')):.1f}"
+        )
+
     meta = {
         "split": split_name,
         "gt_images": len(gt_coco["images"]),
@@ -486,8 +544,19 @@ def _run_one_split(args, split_name: str, out_dir: Path) -> list[dict]:
         "predictions_dir": str(args.predictions_dir) if args.predictions_dir else None,
         "dataset_dir": str(args.dataset_dir) if args.dataset_dir else None,
         "gt_json": str(gt_path),
+        "overall_metrics": bool(overall_metrics),
     }
     (out_dir / "eval_meta.json").write_text(json.dumps(meta, indent=2))
+    return rows, extras
+
+
+def _run_one_split(args, split_name: str, out_dir: Path) -> list[dict]:
+    rows, _extras = run_per_tile_evaluation(
+        args,
+        split_name,
+        out_dir,
+        overall_metrics=bool(getattr(args, "overall_metrics", False)),
+    )
     return rows
 
 
@@ -566,6 +635,14 @@ def main() -> None:
         default=None,
         choices=["train", "valid", "test"],
         help="Membership split for --split-config (default: the split being evaluated).",
+    )
+    parser.add_argument(
+        "--overall-metrics",
+        action="store_true",
+        help=(
+            "Also write overall_metrics.json with whole-split AP/AR and "
+            "size-bucket breakdown (ground-m² primary + pixel-area)."
+        ),
     )
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)

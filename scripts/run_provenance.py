@@ -236,16 +236,32 @@ def write_training_provenance(
 
 def update_training_metrics(
     output_dir: Path | str,
-    metrics_valid: dict[str, Any],
+    metrics_valid: dict[str, Any] | None = None,
+    *,
+    metrics_test: dict[str, Any] | None = None,
+    metrics_valid_at_best: dict[str, Any] | None = None,
 ) -> Path | None:
-    """Attach final ``metrics_valid`` to an existing training provenance file."""
+    """Attach final metrics to an existing training provenance file.
+
+    ``metrics_valid`` — post-train eval on the weights left in memory (unchanged
+    historical behavior). ``metrics_test`` / ``metrics_valid_at_best`` — held-out
+    test (and optional val-at-best) from the selected checkpoint; stored under
+    distinct keys so they are never averaged into the validation curve.
+    """
     output_dir = Path(output_dir)
     path = output_dir / TRAINING_PROVENANCE
     if not path.is_file():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    data["metrics_valid"] = _jsonable(metrics_valid)
-    data["metrics_valid_updated_utc"] = utc_now()
+    if metrics_valid is not None:
+        data["metrics_valid"] = _jsonable(metrics_valid)
+        data["metrics_valid_updated_utc"] = utc_now()
+    if metrics_test is not None:
+        data["metrics_test"] = _jsonable(metrics_test)
+        data["metrics_test_updated_utc"] = utc_now()
+    if metrics_valid_at_best is not None:
+        data["metrics_valid_at_best"] = _jsonable(metrics_valid_at_best)
+        data["metrics_valid_at_best_updated_utc"] = utc_now()
     write_json(path, data)
     print(f"Updated metrics in {path}")
     return path
@@ -273,6 +289,12 @@ def format_provenance(data: dict[str, Any]) -> str:
     if data.get("metrics_valid"):
         lines.append("metrics_valid:")
         lines.append(json.dumps(data["metrics_valid"], indent=2))
+    if data.get("metrics_test"):
+        lines.append("metrics_test:")
+        lines.append(json.dumps(data["metrics_test"], indent=2))
+    if data.get("metrics_valid_at_best"):
+        lines.append("metrics_valid_at_best:")
+        lines.append(json.dumps(data["metrics_valid_at_best"], indent=2))
     return "\n".join(lines)
 
 
