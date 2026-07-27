@@ -1,0 +1,49 @@
+{
+  "setup_id": "stratified_coastal",
+  "penalty": 0.054123255662188924,
+  "counts": {
+    "train": {
+      "tiles": 131,
+      "boulders": 504,
+      "negative": 53,
+      "blocks": 43
+    },
+    "valid": {
+      "tiles": 24,
+      "boulders": 95,
+      "negative": 16,
+      "blocks": 8
+    },
+    "test": {
+      "tiles": 30,
+      "boulders": 82,
+      "negative": 15,
+      "blocks": 10
+    },
+    "excluded": {
+      "tiles": 13,
+      "boulders": 36,
+      "negative": 6,
+      "blocks": 4
+    }
+  },
+  "n_tiles": 198,
+  "n_blocks": 66,
+  "flags": [],
+  "outliers": [
+    "High-density block 7 (high, split=train): 52 boulders / 3 tiles (density=17.3)",
+    "High-density block 12 (high, split=train): 63 boulders / 3 tiles (density=21.0)",
+    "High-density block 13 (high, split=train): 32 boulders / 3 tiles (density=10.7)",
+    "High-density block 39 (high, split=train): 61 boulders / 3 tiles (density=20.3)",
+    "High-density block 59 (high, split=valid): 32 boulders / 3 tiles (density=10.7)",
+    "Isolated high-count tile 24_06_43: 13 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 24_14_13: 15 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 24_12_08: 15 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 24_12_07: 30 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 24_11_06: 21 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 25_03_38: 13 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 25_04_36: 20 boulders with negative same-year PCA neighbors",
+    "Isolated high-count tile 25_10_05: 17 boulders with negative same-year PCA neighbors",
+    "Train negative fraction outside 15\u201340% soft band: 40.5%"
+  ]
+}

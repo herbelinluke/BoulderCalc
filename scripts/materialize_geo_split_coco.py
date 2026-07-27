@@ -2,8 +2,13 @@
 """Materialize a train/valid/test COCO dir from a shared offline-aug tile pool.
 
 The geo-split weekend experiment builds and augments **all** tiles once
-(``all_tiles.yaml`` → ``coco_geo_all_rgb_dsm_aug``). Each setup then filters
+(``all_tiles.yaml`` → ``coco_geo_all_*_aug``). Each setup then filters
 that pool into train/valid/test by geographic split config.
+
+**Hold-out hygiene:** offline-aug variants (``*_hflip``, ``*_rot90``, …) are
+included for **train** only. Valid/test drop those stems (or use
+``--holdout-pool-dir`` pointing at the unaugmented pool). Pass
+``--allow-aug-holdout`` only to restore the old contaminated behavior.
 
 By default images are **hard-linked** into the output (same disk blocks, no
 extra space; works on Windows guest / non-admin). Symlinks need admin or
@@ -13,6 +18,7 @@ the pool is already ~20GB).
 Example:
   python BoulderCalculator/scripts/materialize_geo_split_coco.py \\
     --pool-dir segmentation/coco_geo_all_rgb_dsm_aug \\
+    --holdout-pool-dir segmentation/coco_geo_all_rgb_dsm \\
     --split-config BoulderCalculator/experiments/geo_splits/baseline.yaml \\
     --output-dir segmentation/coco_geo_baseline_from_pool
 """
@@ -59,6 +65,12 @@ def strip_aug_variant(stem: str) -> str:
         if stem.endswith(suffix):
             return stem[: -len(suffix)]
     return stem
+
+
+def is_aug_variant_name(file_name: str) -> bool:
+    """True when ``file_name`` is an offline-aug stem (…_hflip, …_rot90, …)."""
+    stem = Path(file_name).stem
+    return strip_aug_variant(stem) != stem
 
 
 def file_name_to_year_key(file_name: str) -> str | None:
@@ -131,12 +143,18 @@ def materialize_split(
     anns_by_image: dict[int, list[dict]],
     meta: dict,
     link_mode: str,
+    exclude_aug_variants: bool = False,
 ) -> dict:
     selected = []
+    n_skipped_aug = 0
     for image in pool_images:
         yk = file_name_to_year_key(image["file_name"])
-        if yk is not None and yk in year_keys:
-            selected.append(image)
+        if yk is None or yk not in year_keys:
+            continue
+        if exclude_aug_variants and is_aug_variant_name(image["file_name"]):
+            n_skipped_aug += 1
+            continue
+        selected.append(image)
 
     out_img_dir = output_dir / split_name
     out_img_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +208,8 @@ def materialize_split(
         "tile_keys": len(year_keys),
         "images": len(new_images),
         "annotations": len(new_annotations),
+        "skipped_aug_variants": n_skipped_aug,
+        "exclude_aug_variants": exclude_aug_variants,
         "link_modes": modes_used,
         "json": str(ann_path),
     }
@@ -223,6 +243,24 @@ def main() -> None:
         help="Deprecated alias for --link-mode copy.",
     )
     parser.add_argument("--years", type=str, default="24,25")
+    parser.add_argument(
+        "--holdout-pool-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Optional unaugmented COCO dir used only for valid/test images. "
+            "When omitted, valid/test are taken from --pool-dir but offline-aug "
+            "variants (*_hflip, *_rot90, …) are dropped so hold-outs stay clean."
+        ),
+    )
+    parser.add_argument(
+        "--allow-aug-holdout",
+        action="store_true",
+        help=(
+            "Do NOT strip offline-aug variants from valid/test when using a "
+            "single --pool-dir (legacy; not recommended)."
+        ),
+    )
     args = parser.parse_args()
 
     link_mode = "copy" if args.copy else args.link_mode
@@ -234,28 +272,60 @@ def main() -> None:
     )
 
     meta, pool_images, anns_by_image = load_pool_images(args.pool_dir)
+    holdout_pool = args.holdout_pool_dir
+    if holdout_pool is not None:
+        hold_meta, hold_images, hold_anns = load_pool_images(holdout_pool)
+    else:
+        hold_meta, hold_images, hold_anns = meta, pool_images, anns_by_image
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Train may include offline-aug variants from the (aug) pool.
+    # Valid/test must be unaugmented originals.
+    strip_holdout_aug = not args.allow_aug_holdout
     summary = []
-    for split_name, keys in (("train", train), ("valid", valid), ("test", test)):
+    for split_name, keys, images, anns, pdir, meta_i, strip_aug in (
+        ("train", train, pool_images, anns_by_image, args.pool_dir, meta, False),
+        (
+            "valid",
+            valid,
+            hold_images,
+            hold_anns,
+            holdout_pool or args.pool_dir,
+            hold_meta,
+            strip_holdout_aug,
+        ),
+        (
+            "test",
+            test,
+            hold_images,
+            hold_anns,
+            holdout_pool or args.pool_dir,
+            hold_meta,
+            strip_holdout_aug,
+        ),
+    ):
         summary.append(
             materialize_split(
-                pool_dir=args.pool_dir,
+                pool_dir=pdir,
                 output_dir=args.output_dir,
                 split_name=split_name,
                 year_keys=set(keys),
-                pool_images=pool_images,
-                anns_by_image=anns_by_image,
-                meta=meta,
+                pool_images=images,
+                anns_by_image=anns,
+                meta=meta_i,
                 link_mode=link_mode,
+                exclude_aug_variants=strip_aug,
             )
         )
     print(
         json.dumps(
             {
                 "pool": str(args.pool_dir),
+                "holdout_pool": str(holdout_pool) if holdout_pool else None,
                 "setup": split_config.get("id"),
                 "link_mode_requested": link_mode,
+                "strip_aug_from_holdout": strip_holdout_aug,
                 "splits": summary,
             },
             indent=2,
@@ -271,12 +341,18 @@ def main() -> None:
             "split_config": str(args.split_config),
             "setup_id": split_config.get("id"),
             "pool_dir": str(args.pool_dir),
+            "holdout_pool_dir": str(holdout_pool) if holdout_pool else None,
+            "strip_aug_from_holdout": strip_holdout_aug,
             "link_mode": link_mode,
             "years": args.years,
         },
         splits_summary=summary,
-        parents=[args.pool_dir],
-        notes="Geo-split view of a shared offline-aug pool (hardlink/symlink/copy).",
+        parents=[args.pool_dir]
+        + ([holdout_pool] if holdout_pool is not None else []),
+        notes=(
+            "Geo-split view of a shared pool. Train may include offline-aug "
+            "variants; valid/test exclude them unless --allow-aug-holdout."
+        ),
     )
 
 

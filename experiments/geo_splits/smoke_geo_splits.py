@@ -269,6 +269,8 @@ def pipeline_one(
             str(SCRIPTS / "materialize_geo_split_coco.py"),
             "--pool-dir",
             str(pool_dir),
+            "--holdout-pool-dir",
+            str(root / "segmentation" / POOL_4B),
             "--split-config",
             str(split_yaml),
             "--segmentation-dir",

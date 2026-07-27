@@ -310,6 +310,14 @@ def train_one(
         raise SystemExit(f"Missing {split_yaml}")
 
     out_coco = seg / f"coco_geo512_{setup}_{modality}_from_pool"
+    # Train from aug pool; valid/test strip offline-aug variants (or use unaug pool).
+    holdout = None
+    if modality == "rgb":
+        holdout = seg / POOL_RGB
+    elif modality == "rgb_dsm":
+        holdout = seg / POOL_4B
+    elif modality == "rgb_local_relief":
+        holdout = seg / POOL_LR
     mat_cmd = [
         py,
         str(SCRIPTS / "materialize_geo_split_coco.py"),
@@ -322,6 +330,8 @@ def train_one(
         "--link-mode",
         link_mode,
     ]
+    if holdout is not None and holdout.is_dir():
+        mat_cmd.extend(["--holdout-pool-dir", str(holdout)])
     run(mat_cmd, label=f"materialize {setup}/{modality}")
 
     if skip_train:

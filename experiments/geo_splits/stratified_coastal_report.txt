@@ -1,0 +1,39 @@
+========================================================================
+STRATIFIED COASTAL SPATIAL SPLIT — SUMMARY REPORT
+========================================================================
+
+Tiles total: 198  |  Blocks: 66  |  Usable (excl. buffer): 185
+
+Density tiers (blocks):
+  high          blocks= 34  tiles=102  boulders=  627
+  medium_low    blocks= 27  tiles= 81  boulders=   90
+  negative      blocks=  5  tiles= 15  boulders=    0
+
+Split        Tiles   Tile%  Boulders  Bould% NegTiles    Neg%  Blocks
+train          131   70.8%       504   74.0%       53   40.5%      43
+valid           24   13.0%        95   14.0%       16   66.7%       8
+test            30   16.2%        82   12.0%       15   50.0%      10
+excluded        13    6.6%        36    5.0%        6   46.2%       4
+
+Target bands: tiles/instances train 70–75%, val/test 12.5–15%; train negatives ~25–40% (dataset ~45% negative at ≥1.5 m²).
+
+Spatial integrity:
+  ✓ No tile overlap between splits.
+  ✓ No train↔holdout adjacency (buffer applied).
+
+Outliers / flags:
+  • High-density block 7 (high, split=train): 52 boulders / 3 tiles (density=17.3)
+  • High-density block 12 (high, split=train): 63 boulders / 3 tiles (density=21.0)
+  • High-density block 13 (high, split=train): 32 boulders / 3 tiles (density=10.7)
+  • High-density block 39 (high, split=train): 61 boulders / 3 tiles (density=20.3)
+  • High-density block 59 (high, split=valid): 32 boulders / 3 tiles (density=10.7)
+  • Isolated high-count tile 24_06_43: 13 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 24_14_13: 15 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 24_12_08: 15 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 24_12_07: 30 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 24_11_06: 21 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 25_03_38: 13 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 25_04_36: 20 boulders with negative same-year PCA neighbors
+  • Isolated high-count tile 25_10_05: 17 boulders with negative same-year PCA neighbors
+  • Train negative fraction outside 15–40% soft band: 40.5%
+========================================================================

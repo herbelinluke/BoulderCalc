@@ -10,8 +10,12 @@ photometric jitter, transforms the polygon annotations exactly, and writes a
 new dataset dir.
 
 By default only the train split is expanded (valid/test copied unchanged).
-Pass ``--splits train,valid,test`` to offline-augment every split (used by the
-geo-split weekend experiment).
+**Prefer this default** — never offline-augment valid/test for hold-out metrics.
+Pass ``--splits train,valid,test`` only for debugging.
+
+When materializing geo setups from a shared *all-tiles-in-train* aug pool,
+``materialize_geo_split_coco.py`` strips aug variants from valid/test so
+hold-outs stay clean even if the pool JSON lists them under train.
 
 Online training (``train_boulder_local.py``) additionally applies full-circle
 rotation, scale jitter, blur, noise, and synthetic shadows via
@@ -400,8 +404,8 @@ def main() -> None:
         default="train",
         help=(
             "Comma-separated splits to offline-augment "
-            "(train, valid, test). Default: train only; other splits are copied. "
-            "Use train,valid,test for the geo-split weekend experiment."
+            "(train, valid, test). Default: train only; other splits are copied "
+            "unchanged (recommended for clean hold-outs)."
         ),
     )
     add_force_argument(parser)

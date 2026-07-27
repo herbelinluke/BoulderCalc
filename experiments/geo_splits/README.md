@@ -70,6 +70,58 @@ GeoTIFFs). Optional full rebuild: `--build-rgb-dsm-tiles` / `--force-tiles`.
 Rebuild the shared COCO+aug pool after changing annotations or small-boulder
 policy: `--force-pool`.
 
+## Stratified coastal overnight (RGB @ 2000)
+
+Density-stratified split [`stratified_coastal.yaml`](stratified_coastal.yaml)
+(~74/12/14 boulder counts). Offline **8×+jitter on train only**; valid/test
+stay unaugmented. Two sequential trains:
+
+1. **balanced** — oversample positives ~1.5×; thin deposit-heavy + green-hilly
+   empties; keep a fraction of coastal empties
+2. **control** — same split/aug, no resample
+
+```bash
+# From project root (laptop / Linux)
+bash BoulderCalculator/experiments/geo_splits/run_stratified_coastal_rgb_overnight.sh
+```
+
+### Windows (admin + CUDA): RGB A/B **and** local-relief A
+
+Builds local-relief 2000×2000 parents, then trains Run C with the **same**
+resample policy as RGB Run A (`--four-band`).
+
+**1. Smoke first** (full build + 3-iter trains into `*_smoke` dirs):
+
+```bat
+BoulderCalculator\experiments\geo_splits\smoke_stratified_coastal_windows.bat
+```
+
+**2. Overnight** (only after smoke exits 0):
+
+```bat
+BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.bat
+```
+
+Or:
+
+```bat
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode smoke --device cuda
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode weekend --device cuda
+```
+
+Outputs:
+
+| Run | Dir |
+|-----|-----|
+| A RGB balanced | `segmentation\training_run_geo_stratified_coastal_rgb_balanced\` |
+| B RGB control | `segmentation\training_run_geo_stratified_coastal_rgb\` |
+| C local-relief balanced | `segmentation\training_run_geo_stratified_coastal_rgb_local_relief_balanced\` |
+
+Skip pieces: `--skip-rgb-control`, `--skip-local-relief`, `--skip-rgb-balanced`.
+
+Defaults: `--min-area-m2 1.5`, `--no-rich-aug`, jitter 0.15, eval every 500,
+early-stop patience 1000, batch auto (2 if CUDA ≥10 GiB else 1), `--link-mode hard`.
+
 ## Smoke all setups (do this before leaving for the weekend)
 
 From project root, with CUDA env active:
