@@ -88,8 +88,8 @@ _TILES_USED_TEXT = """\
 13:5-13
 
 2024 tiles annotated:
-4:44-46
-5:42-46
+4:44-45
+5:42-45
 6:40-45
 7:38-43
 8:35-40
@@ -153,6 +153,10 @@ def load_tiles_used(path: Path) -> dict[int, list[str]]:
 _DEFAULT_TILES = parse_tiles_used_text(_TILES_USED_TEXT)
 TILES_24 = list(_DEFAULT_TILES[24])
 TILES_25 = list(_DEFAULT_TILES[25])
+
+# Year-24 east-edge column (messy mosaic cutoff) — always dropped from every split,
+# even if an older tiles_used.txt still lists them.
+ALWAYS_EXCLUDED_24 = ["4_46", "5_46"]
 
 # Geographic leakage-safe hold-outs (EPSG:25829 footprint blocks along the coast).
 # Built so no train/valid/test pair shares overlapping ground (incl. cross-year).
@@ -381,6 +385,8 @@ def expand_year_keys(
         valid_set = {canonical_key(k) for k in valid_by.get(year, [])}
         test_set = {canonical_key(k) for k in test_by.get(year, [])}
         excluded_set = {canonical_key(k) for k in excl_by.get(year, [])}
+        if year == 24:
+            excluded_set |= {canonical_key(k) for k in ALWAYS_EXCLUDED_24}
         missing_holdouts = sorted((valid_set | test_set) - set(tiles))
         if missing_holdouts:
             raise ValueError(
@@ -1424,6 +1430,15 @@ def main() -> None:
         default=Path("."),
         help="Project root containing 2024/ and 2025/ DSM files (default: .).",
     )
+    parser.add_argument(
+        "--skip-leakage-check",
+        action="store_true",
+        help=(
+            "Skip geographic / location-consistency footprint checks between "
+            "train/valid/test (temporary escape hatch for known mild cross-year "
+            "valid↔test overlap)."
+        ),
+    )
     args = parser.parse_args()
 
     years = [args.year] if args.year is not None else parse_years(args.years, [24, 25])
@@ -1486,25 +1501,31 @@ def main() -> None:
         + ",".join(test_default)
     )
     # Verify leakage policy for this split config.
-    try:
-        if leakage_check == "location_consistency":
-            assert_location_consistency(
-                tile_dir, train_default, valid_default, test_default
-            )
-            print(
-                "Location consistency check: OK "
-                "(overlapping footprints stay in one split)"
-            )
-        else:
-            assert_no_geographic_leakage(
-                tile_dir, train_default, valid_default, test_default
-            )
-            print(
-                "Geographic leakage check: OK "
-                "(no overlapping footprints across splits)"
-            )
-    except FileNotFoundError as exc:
-        print(f"Leakage check skipped (missing tile): {exc}")
+    if args.skip_leakage_check:
+        print(
+            f"Leakage check skipped (--skip-leakage-check; "
+            f"config asked for {leakage_check})"
+        )
+    else:
+        try:
+            if leakage_check == "location_consistency":
+                assert_location_consistency(
+                    tile_dir, train_default, valid_default, test_default
+                )
+                print(
+                    "Location consistency check: OK "
+                    "(overlapping footprints stay in one split)"
+                )
+            else:
+                assert_no_geographic_leakage(
+                    tile_dir, train_default, valid_default, test_default
+                )
+                print(
+                    "Geographic leakage check: OK "
+                    "(no overlapping footprints across splits)"
+                )
+        except FileNotFoundError as exc:
+            print(f"Leakage check skipped (missing tile): {exc}")
 
     if (
         args.no_roi

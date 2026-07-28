@@ -65,6 +65,9 @@ test:
   - '13_10'
 excluded:
   24:
+  # East-edge col 46: truncated / messy mosaic cutoff (also ALWAYS_EXCLUDED_24).
+  - '4_46'
+  - '5_46'
   - '10_6'
   - '11_6'
   - '13_7'

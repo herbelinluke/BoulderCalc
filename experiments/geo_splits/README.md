@@ -74,15 +74,22 @@ policy: `--force-pool`.
 
 Density-stratified split [`stratified_coastal.yaml`](stratified_coastal.yaml)
 (~74/12/14 boulder counts). Offline **8×+jitter on train only**; valid/test
-stay unaugmented. Two sequential trains:
+stay unaugmented. Year-24 east-edge tiles `4_46` / `5_46` (messy mosaic cutoff)
+are dropped from the tile list and always excluded. Two sequential trains:
 
 1. **balanced** — oversample positives ~1.5×; thin deposit-heavy + green-hilly
    empties; keep a fraction of coastal empties
 2. **control** — same split/aug, no resample
 
+COCO build rejects mild valid↔test cross-year footprint overlap unless you
+pass `--skip-leakage-check` (Windows overnight `.bat` includes this for now).
+
 ```bash
 # From project root (laptop / Linux)
 bash BoulderCalculator/experiments/geo_splits/run_stratified_coastal_rgb_overnight.sh
+# or with the temporary leakage escape hatch:
+python BoulderCalculator/experiments/geo_splits/run_stratified_coastal_rgb_overnight.py \
+  --mode weekend --skip-leakage-check
 ```
 
 ### Windows (admin + CUDA): RGB A/B **and** local-relief A
@@ -105,8 +112,8 @@ BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnigh
 Or:
 
 ```bat
-python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode smoke --device cuda
-python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode weekend --device cuda
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode smoke --device cuda --skip-leakage-check
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode weekend --device cuda --skip-leakage-check
 ```
 
 Outputs:

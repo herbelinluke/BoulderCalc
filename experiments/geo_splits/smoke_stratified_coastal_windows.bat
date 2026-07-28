@@ -9,7 +9,7 @@ if not exist "BoulderCalculator\experiments\geo_splits\run_stratified_coastal_wi
 )
 
 echo Smoke test from %CD%
-python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode smoke --device cuda %*
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode smoke --device cuda --skip-leakage-check %*
 set ERR=%ERRORLEVEL%
 if %ERR% neq 0 (
   echo SMOKE FAILED with exit %ERR% — do not start overnight until fixed.

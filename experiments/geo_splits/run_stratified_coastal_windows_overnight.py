@@ -11,7 +11,7 @@ Pipeline
 5. Build **local-relief** parent tiles (opening SE 5 m, fixed 0.5 m clip, …).
 6. Clone RGB COCO → 4-band local-relief images; aug train-only; **same resample
    knobs as Run A** → **Run C (local-relief balanced)** with ``--four-band``.
-
+1
 Designed for a Windows box with admin + CUDA. Batch size auto: 2 if VRAM ≥10 GiB
 else 1. Eval every 500; early-stop patience 1000 on ``segm/AP``.
 
@@ -282,6 +282,14 @@ def main() -> None:
         help="Default hard (Windows guest / admin friendly).",
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--skip-leakage-check",
+        action="store_true",
+        help=(
+            "Pass through to gpkg_to_coco: skip geographic footprint leakage "
+            "check (known mild valid↔test cross-year overlap on stratified_coastal)."
+        ),
+    )
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--skip-rgb-balanced", action="store_true")
     parser.add_argument("--skip-rgb-control", action="store_true")
@@ -373,6 +381,8 @@ def main() -> None:
     ]
     if args.force:
         gpkg_cmd.append("--force")
+    if args.skip_leakage_check:
+        gpkg_cmd.append("--skip-leakage-check")
     run(gpkg_cmd, label="gpkg_to_coco stratified_coastal RGB")
 
     aug_rgb = [

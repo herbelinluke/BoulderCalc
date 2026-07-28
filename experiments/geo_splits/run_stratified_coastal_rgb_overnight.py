@@ -121,6 +121,14 @@ def main() -> None:
     parser.add_argument("--link-mode", default="auto", choices=("auto", "hard", "symlink", "copy"))
     parser.add_argument("--force", action="store_true", help="Rebuild COCO/aug/resample.")
     parser.add_argument(
+        "--skip-leakage-check",
+        action="store_true",
+        help=(
+            "Pass through to gpkg_to_coco: skip geographic footprint leakage "
+            "check (known mild valid↔test cross-year overlap on stratified_coastal)."
+        ),
+    )
+    parser.add_argument(
         "--skip-control",
         action="store_true",
         help="Only run balanced (resampled) training.",
@@ -222,6 +230,8 @@ def main() -> None:
     ]
     if args.force:
         gpkg_cmd.append("--force")
+    if args.skip_leakage_check:
+        gpkg_cmd.append("--skip-leakage-check")
     run(gpkg_cmd, label="gpkg_to_coco stratified_coastal RGB")
 
     # --- 2) Offline aug train-only ---

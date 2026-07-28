@@ -160,6 +160,7 @@ def build_chip_coco(
     min_area_m2: float,
     link_mode: str,
     force: bool,
+    skip_leakage_check: bool = False,
 ) -> Path:
     seg = root / "segmentation"
     p = paths_for_chip(seg, chip)
@@ -184,6 +185,8 @@ def build_chip_coco(
     ]
     if force:
         cmd.append("--force")
+    if skip_leakage_check:
+        cmd.append("--skip-leakage-check")
     run(cmd, label=f"gpkg_to_coco {chip} stratified_coastal RGB")
     return p["coco"]
 
@@ -309,6 +312,14 @@ def main() -> None:
         choices=("auto", "hard", "symlink", "copy"),
     )
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--skip-leakage-check",
+        action="store_true",
+        help=(
+            "Pass through to gpkg_to_coco: skip geographic footprint leakage "
+            "check (known mild valid↔test cross-year overlap on stratified_coastal)."
+        ),
+    )
     parser.add_argument("--skip-retile", action="store_true")
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--python", default=sys.executable)
@@ -378,6 +389,7 @@ def main() -> None:
             min_area_m2=args.min_area_m2,
             link_mode=args.link_mode,
             force=args.force,
+            skip_leakage_check=args.skip_leakage_check,
         )
         augment_train_only(py, p["coco"], p["coco_aug"], args.jitter, args.force)
         resample_balanced(py, p["coco_aug"], p["coco_bal"], args)

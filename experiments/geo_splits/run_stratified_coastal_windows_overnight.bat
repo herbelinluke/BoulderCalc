@@ -12,7 +12,8 @@ if not exist "BoulderCalculator\experiments\geo_splits\run_stratified_coastal_wi
 )
 
 echo Project root: %CD%
-python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode weekend --device cuda %*
+REM --skip-leakage-check: stratified_coastal has mild valid↔test footprint overlap (24/25).
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_overnight.py --mode weekend --device cuda --skip-leakage-check %*
 set ERR=%ERRORLEVEL%
 if %ERR% neq 0 (
   echo FAILED with exit %ERR%

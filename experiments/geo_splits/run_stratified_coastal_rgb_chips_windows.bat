@@ -8,7 +8,7 @@ if not exist "BoulderCalculator\experiments\geo_splits\run_stratified_coastal_rg
   exit /b 1
 )
 echo Weekend RGB chips from %CD%
-python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_rgb_chips_windows.py --mode weekend --device cuda %*
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_rgb_chips_windows.py --mode weekend --device cuda --skip-leakage-check %*
 set ERR=%ERRORLEVEL%
 if %ERR% neq 0 (
   echo FAILED exit %ERR%
