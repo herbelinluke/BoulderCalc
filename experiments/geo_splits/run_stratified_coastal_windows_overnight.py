@@ -156,7 +156,7 @@ def resample_cmd(
     out: Path,
     args: argparse.Namespace,
 ) -> list[str]:
-    return [
+    cmd = [
         py,
         str(SCRIPTS / "resample_coco_train.py"),
         "--input-dir",
@@ -180,6 +180,10 @@ def resample_cmd(
         "--link-mode",
         args.link_mode,
     ]
+    extents = EXP_DIR / "tile_extents_stratified_coastal.geojson"
+    if extents.is_file():
+        cmd.extend(["--tile-extents", str(extents)])
+    return cmd
 
 
 def train_cmd(

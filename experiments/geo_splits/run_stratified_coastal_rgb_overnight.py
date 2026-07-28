@@ -306,6 +306,9 @@ def main() -> None:
             "--link-mode",
             args.link_mode,
         ]
+        extents = EXP_DIR / "tile_extents_stratified_coastal.geojson"
+        if extents.is_file():
+            res_cmd.extend(["--tile-extents", str(extents)])
         if args.force and coco_bal.exists():
             # resample always rewrites; no skip helper
             pass

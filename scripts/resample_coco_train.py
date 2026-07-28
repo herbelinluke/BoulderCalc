@@ -19,17 +19,24 @@ Example::
   python BoulderCalculator/scripts/resample_coco_train.py \\
     --input-dir segmentation/coco_geo_stratified_coastal_aug \\
     --output-dir segmentation/coco_geo_stratified_coastal_aug_balanced \\
+    --tile-extents BoulderCalculator/experiments/geo_splits/tile_extents_stratified_coastal.geojson \\
     --seed 42
+
+Writes ``resample_train_summary.json`` plus QGIS-oriented audits
+(``resample_train_audit_parents.csv`` / ``.geojson``, ``…_images.csv``) describing
+which tiles were oversampled, thinned, or removed and by how much.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import random
 import re
 import shutil
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -42,27 +49,31 @@ SPLIT_ANN = {
     "test": "testing_annotations.json",
 }
 
+AUG_SUFFIXES = (
+    "_hflip",
+    "_vflip",
+    "_rot90",
+    "_rot180",
+    "_rot270",
+    "_transpose",
+    "_antitranspose",
+)
+
 _ROW_RE = re.compile(
     r"(?:24_Sites1and2_2024_Orthomosaic_|25_25IniSouthOrt_|Sites1and2_2024_Orthomosaic_|25IniSouthOrt_)(\d+)_(\d+)",
     re.IGNORECASE,
 )
 
 
-def parse_row_col(file_name: str) -> tuple[int | None, int | None]:
-    stem = Path(file_name).stem
-    # Strip offline-aug suffix if present.
-    for suffix in (
-        "_hflip",
-        "_vflip",
-        "_rot90",
-        "_rot180",
-        "_rot270",
-        "_transpose",
-        "_antitranspose",
-    ):
+def strip_aug_suffix(stem: str) -> tuple[str, str | None]:
+    for suffix in AUG_SUFFIXES:
         if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
+            return stem[: -len(suffix)], suffix[1:]
+    return stem, None
+
+
+def parse_row_col(file_name: str) -> tuple[int | None, int | None]:
+    stem, _ = strip_aug_suffix(Path(file_name).stem)
     m = _ROW_RE.search(stem)
     if m:
         return int(m.group(1)), int(m.group(2))
@@ -70,6 +81,23 @@ def parse_row_col(file_name: str) -> tuple[int | None, int | None]:
     if m2:
         return int(m2.group(1)), int(m2.group(2))
     return None, None
+
+
+def infer_year(file_name: str) -> int | None:
+    stem, _ = strip_aug_suffix(Path(file_name).stem)
+    if stem.startswith("24_") or "2024_Orthomosaic" in stem:
+        return 24
+    if stem.startswith("25_") or "25IniSouthOrt" in stem or "IniSouthOrt" in stem:
+        return 25
+    return None
+
+
+def year_key_from_file_name(file_name: str) -> str | None:
+    year = infer_year(file_name)
+    row, col = parse_row_col(file_name)
+    if year is None or row is None or col is None:
+        return None
+    return f"{year}_{row:02d}_{col:02d}"
 
 
 def classify_image(
@@ -131,7 +159,7 @@ def resample_train(
     keep_empty_coast: float,
     keep_empty_other: float,
     hilly_row_max: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
     rng = random.Random(seed)
     images = list(coco["images"])
     anns_by: dict[int, list[dict]] = {}
@@ -145,11 +173,13 @@ def resample_train(
         "empty_coast": [],
         "empty_other": [],
     }
+    bucket_of: dict[int, str] = {}
     for im in images:
         iid = int(im["id"])
         row, _col = parse_row_col(im["file_name"])
         cls = classify_image(anns_by.get(iid, []), row, hilly_row_max=hilly_row_max)
         buckets[cls].append(iid)
+        bucket_of[iid] = cls
 
     selected: list[int] = []
     kept_counts: dict[str, int] = {}
@@ -180,6 +210,37 @@ def resample_train(
     keep_frac(buckets["empty_coast"], keep_empty_coast, "empty_coast")
     keep_frac(buckets["empty_other"], keep_empty_other, "empty_other")
 
+    copy_counts = Counter(selected)
+    image_audit: list[dict[str, Any]] = []
+    by_id = {int(im["id"]): im for im in images}
+    for iid, im in by_id.items():
+        n_out = int(copy_counts.get(iid, 0))
+        stem = Path(im["file_name"]).stem
+        parent_stem, aug_variant = strip_aug_suffix(stem)
+        row, col = parse_row_col(im["file_name"])
+        bucket = bucket_of[iid]
+        if n_out == 0:
+            action = "removed"
+        elif n_out > 1:
+            action = "oversampled"
+        else:
+            action = "kept"
+        image_audit.append(
+            {
+                "image_id": iid,
+                "file_name": im["file_name"],
+                "parent_stem": parent_stem,
+                "aug_variant": aug_variant or "orig",
+                "year": infer_year(im["file_name"]),
+                "row": row,
+                "col": col,
+                "year_key": year_key_from_file_name(im["file_name"]),
+                "bucket": bucket,
+                "action": action,
+                "n_copies_out": n_out,
+            }
+        )
+
     rng.shuffle(selected)
     new_images, new_anns = rewrite_split(images, anns_by, selected)
     out = {
@@ -200,8 +261,120 @@ def resample_train(
         "keep_empty_coast": keep_empty_coast,
         "keep_empty_other": keep_empty_other,
         "seed": seed,
+        "n_removed_images": sum(1 for r in image_audit if r["action"] == "removed"),
+        "n_oversampled_images": sum(1 for r in image_audit if r["action"] == "oversampled"),
+        "n_kept_once_images": sum(1 for r in image_audit if r["action"] == "kept"),
     }
-    return out, stats
+    return out, stats, image_audit
+
+
+def aggregate_parent_audit(
+    image_audit: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Roll image-level decisions up to unaugmented parent tiles for QGIS."""
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in image_audit:
+        key = row.get("year_key") or row["parent_stem"]
+        groups[str(key)].append(row)
+
+    parents: list[dict[str, Any]] = []
+    for key, rows in sorted(groups.items()):
+        n_in = len(rows)
+        n_out = sum(int(r["n_copies_out"]) for r in rows)
+        n_removed = sum(1 for r in rows if r["action"] == "removed")
+        bucket_counts = Counter(r["bucket"] for r in rows)
+        primary_bucket = bucket_counts.most_common(1)[0][0]
+        if n_out == 0:
+            status = "removed"
+        elif n_out > n_in:
+            status = "oversampled"
+        elif n_removed > 0 and n_out < n_in:
+            status = "thinned"
+        else:
+            status = "kept"
+        sample = rows[0]
+        parents.append(
+            {
+                "year_key": sample.get("year_key"),
+                "parent_stem": sample["parent_stem"],
+                "year": sample.get("year"),
+                "row": sample.get("row"),
+                "col": sample.get("col"),
+                "primary_bucket": primary_bucket,
+                "bucket_counts": dict(bucket_counts),
+                "status": status,
+                "n_images_in": n_in,
+                "n_images_out": n_out,
+                "n_images_removed": n_removed,
+                "oversample_factor": round(n_out / n_in, 4) if n_in else 0.0,
+                "removed": int(n_out == 0),
+                "oversampled": int(n_out > n_in),
+            }
+        )
+    return parents
+
+
+def write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            flat = dict(row)
+            if "bucket_counts" in flat and isinstance(flat["bucket_counts"], dict):
+                flat["bucket_counts"] = json.dumps(flat["bucket_counts"], sort_keys=True)
+            writer.writerow(flat)
+
+
+def write_parent_geojson(
+    path: Path,
+    parents: list[dict[str, Any]],
+    extents_geojson: Path | None,
+) -> int:
+    """Write parent audit GeoJSON; join geometries from tile extents when available."""
+    geom_by_key: dict[str, Any] = {}
+    crs = {"type": "name", "properties": {"name": "urn:ogc:def:crs:EPSG::25829"}}
+    if extents_geojson is not None and extents_geojson.is_file():
+        extents = json.loads(extents_geojson.read_text(encoding="utf-8"))
+        crs = extents.get("crs", crs)
+        for feat in extents.get("features", []):
+            props = feat.get("properties") or {}
+            yk = props.get("year_key")
+            if yk:
+                geom_by_key[str(yk)] = feat.get("geometry")
+
+    features = []
+    for row in parents:
+        yk = row.get("year_key")
+        geom = geom_by_key.get(str(yk)) if yk else None
+        props = {
+            k: v
+            for k, v in row.items()
+            if k != "bucket_counts"
+        }
+        props["bucket_counts"] = json.dumps(row.get("bucket_counts") or {}, sort_keys=True)
+        features.append(
+            {
+                "type": "Feature",
+                "properties": props,
+                "geometry": geom,
+            }
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "name": path.stem,
+                "crs": crs,
+                "features": features,
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return sum(1 for f in features if f.get("geometry") is not None)
 
 
 def copy_holdout_split(
@@ -275,6 +448,21 @@ def main() -> None:
         default="auto",
         choices=("auto", "hard", "symlink", "copy"),
     )
+    parser.add_argument(
+        "--tile-extents",
+        type=Path,
+        default=None,
+        help=(
+            "Optional tile extents GeoJSON (year_key property) to join into "
+            "resample_train_audit_parents.geojson for QGIS before/after maps."
+        ),
+    )
+    parser.add_argument(
+        "--audit-dir",
+        type=Path,
+        default=None,
+        help="Where to write audit CSV/GeoJSON (default: --output-dir).",
+    )
     args = parser.parse_args()
 
     train_ann = args.input_dir / SPLIT_ANN["train"]
@@ -282,8 +470,10 @@ def main() -> None:
         raise SystemExit(f"Missing {train_ann}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    audit_dir = args.audit_dir or args.output_dir
+    audit_dir.mkdir(parents=True, exist_ok=True)
     coco = load_coco(train_ann)
-    new_coco, stats = resample_train(
+    new_coco, stats, image_audit = resample_train(
         coco,
         seed=args.seed,
         positive_oversample=args.positive_oversample,
@@ -296,6 +486,49 @@ def main() -> None:
     (args.output_dir / SPLIT_ANN["train"]).write_text(
         json.dumps(new_coco), encoding="utf-8"
     )
+
+    parent_audit = aggregate_parent_audit(image_audit)
+    image_csv = audit_dir / "resample_train_audit_images.csv"
+    parent_csv = audit_dir / "resample_train_audit_parents.csv"
+    parent_geojson = audit_dir / "resample_train_audit_parents.geojson"
+    write_csv(
+        image_csv,
+        image_audit,
+        [
+            "image_id",
+            "file_name",
+            "parent_stem",
+            "aug_variant",
+            "year",
+            "row",
+            "col",
+            "year_key",
+            "bucket",
+            "action",
+            "n_copies_out",
+        ],
+    )
+    write_csv(
+        parent_csv,
+        parent_audit,
+        [
+            "year_key",
+            "parent_stem",
+            "year",
+            "row",
+            "col",
+            "primary_bucket",
+            "bucket_counts",
+            "status",
+            "n_images_in",
+            "n_images_out",
+            "n_images_removed",
+            "oversample_factor",
+            "removed",
+            "oversampled",
+        ],
+    )
+    n_joined = write_parent_geojson(parent_geojson, parent_audit, args.tile_extents)
 
     # Link train images referenced by the resampled JSON.
     train_img_out = args.output_dir / "train"
@@ -329,10 +562,34 @@ def main() -> None:
         "train_resample": stats,
         "train_link_modes": modes,
         "holdouts": holdouts,
+        "audit": {
+            "images_csv": str(image_csv),
+            "parents_csv": str(parent_csv),
+            "parents_geojson": str(parent_geojson),
+            "tile_extents": str(args.tile_extents) if args.tile_extents else None,
+            "n_parents": len(parent_audit),
+            "n_parents_with_geometry": n_joined,
+            "n_parents_removed": sum(1 for p in parent_audit if p["removed"]),
+            "n_parents_oversampled": sum(1 for p in parent_audit if p["oversampled"]),
+            "policy": {
+                "positive_oversample": args.positive_oversample,
+                "keep_deposit": args.keep_deposit,
+                "keep_hilly": args.keep_hilly,
+                "keep_empty_coast": args.keep_empty_coast,
+                "keep_empty_other": args.keep_empty_other,
+                "hilly_row_max": args.hilly_row_max,
+                "seed": args.seed,
+            },
+        },
     }
     (args.output_dir / "resample_train_summary.json").write_text(
         json.dumps(summary, indent=2) + "\n", encoding="utf-8"
     )
+    # Mirror summary into audit dir when separate (easy to find for QGIS).
+    if audit_dir.resolve() != args.output_dir.resolve():
+        (audit_dir / "resample_train_summary.json").write_text(
+            json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+        )
     print(json.dumps(summary, indent=2))
 
     from run_provenance import write_dataset_provenance
@@ -349,10 +606,15 @@ def main() -> None:
             "hilly_row_max": args.hilly_row_max,
             "seed": args.seed,
             "link_mode": args.link_mode,
+            "tile_extents": str(args.tile_extents) if args.tile_extents else None,
+            "audit_dir": str(audit_dir),
         },
         splits_summary=summary,
         parents=[args.input_dir],
-        notes="Train resampled (oversample positives / thin empties); valid/test copied.",
+        notes=(
+            "Train resampled (oversample positives / thin empties); valid/test copied. "
+            "See resample_train_audit_parents.csv/.geojson for QGIS before/after."
+        ),
     )
 
 

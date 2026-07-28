@@ -237,6 +237,9 @@ def resample_balanced(py: str, coco_aug: Path, coco_bal: Path, args) -> None:
         "--link-mode",
         args.link_mode,
     ]
+    extents = EXP_DIR / "tile_extents_stratified_coastal.geojson"
+    if extents.is_file():
+        cmd.extend(["--tile-extents", str(extents)])
     run(cmd, label=f"resample train → {coco_bal.name}")
 
 

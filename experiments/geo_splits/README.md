@@ -129,6 +129,41 @@ Skip pieces: `--skip-rgb-control`, `--skip-local-relief`, `--skip-rgb-balanced`.
 Defaults: `--min-area-m2 1.5`, `--no-rich-aug`, jitter 0.15, eval every 500,
 early-stop patience 1000, batch auto (2 if CUDA ≥10 GiB else 1), `--link-mode hard`.
 
+### Windows guest: four balanced variants (RGB+DSM + annotation ablations)
+
+Same split / resample / no-rich-aug / 8×+jitter / skip-leakage defaults, then
+four sequential **balanced** trains:
+
+| Key | Run | Annotation policy |
+|-----|-----|-------------------|
+| `A_rgb_dsm` | RGB+DSM elevation @ 2000 | 1.5 m²; iscrowd deposits + small |
+| `B_rgb_min1p0` | RGB @ 2000 | **1.0 m²**; iscrowd deposits + small |
+| `C_rgb_drop_deposits` | RGB @ 2000 | drop deposits; iscrowd small @ 1.5 |
+| `D_rgb_drop_dep_small` | RGB @ 2000 | drop deposits **and** small |
+
+```bat
+BoulderCalculator\experiments\geo_splits\smoke_stratified_coastal_windows_variants.bat
+BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_variants.bat
+```
+
+Subset / rebuild:
+
+```bat
+python BoulderCalculator\experiments\geo_splits\run_stratified_coastal_windows_variants.py --mode weekend --device cuda --only A_rgb_dsm,B_rgb_min1p0 --force
+```
+
+**QGIS before/after (resample):** each variant writes
+
+`segmentation\resample_audits_stratified_coastal\<key>\`
+
+- `resample_train_audit_parents.geojson` — style by `status`
+  (`removed` / `thinned` / `kept` / `oversampled`) or `oversample_factor`
+- `resample_train_audit_parents.csv` / `…_images.csv`
+- `resample_train_summary.json` — keep rates + `positive_oversample`
+
+Geometries join from
+[`tile_extents_stratified_coastal.geojson`](tile_extents_stratified_coastal.geojson).
+
 ### Windows guest: RGB chips 512 + 1024 (balanced only)
 
 Same split / aug / iscrowd / resample policy as Run A, but **RGB-only chips**
