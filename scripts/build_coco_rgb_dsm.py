@@ -43,18 +43,39 @@ from skip_existing import (  # noqa: E402
 
 
 def resolve_four_band(tile_dirs: list[Path], file_name: str) -> Path:
-    """Find file_name in tile dirs; also try stripping a leading '24_' / '25_' prefix."""
-    candidates = [file_name]
+    """Find file_name in tile dirs.
+
+    COCO RGB copies are year-prefixed (``24_Sites1and2_…tif``); elevation DSM
+    tilings keep the raw ortho basename (``Sites1and2_…tif``). Match either,
+    case-insensitively (Windows-friendly).
+    """
+    name = Path(file_name).name
+    candidates = [name]
+    lower = name.lower()
     for prefix in ("24_", "25_"):
-        if file_name.startswith(prefix):
-            candidates.append(file_name[len(prefix) :])
+        if lower.startswith(prefix):
+            candidates.append(name[len(prefix) :])
+            break
+    # Deduplicate while preserving order.
+    ordered: list[str] = list(dict.fromkeys(candidates))
+
     for tile_dir in tile_dirs:
-        for name in candidates:
-            path = tile_dir / name
-            if path.exists():
+        if not tile_dir.is_dir():
+            continue
+        for cand in ordered:
+            path = tile_dir / cand
+            if path.is_file():
                 return path
+        # Case-insensitive fallback (and tolerate odd casing in COCO JSON).
+        by_lower = {p.name.lower(): p for p in tile_dir.glob("*.tif")}
+        for cand in ordered:
+            hit = by_lower.get(cand.lower())
+            if hit is not None and hit.is_file():
+                return hit
+
     raise FileNotFoundError(
-        f"4-band tile not found for {file_name!r} under {[str(d) for d in tile_dirs]}"
+        f"4-band tile not found for {file_name!r} under {[str(d) for d in tile_dirs]} "
+        f"(tried {[repr(c) for c in ordered]})"
     )
 
 
