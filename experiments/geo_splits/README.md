@@ -122,6 +122,27 @@ Skip pieces: `--skip-rgb-control`, `--skip-local-relief`, `--skip-rgb-balanced`.
 Defaults: `--min-area-m2 1.5`, `--no-rich-aug`, jitter 0.15, eval every 500,
 early-stop patience 1000, batch auto (2 if CUDA ≥10 GiB else 1), `--link-mode hard`.
 
+### Windows guest: RGB chips 512 + 1024 (balanced only)
+
+Same split / aug / iscrowd / resample policy as Run A, but **RGB-only chips**
+(no DSM). Faster than 2000² for guest VRAM.
+
+```bat
+BoulderCalculator\experiments\geo_splits\smoke_stratified_coastal_rgb_chips_windows.bat
+BoulderCalculator\experiments\geo_splits\run_stratified_coastal_rgb_chips_windows.bat
+```
+
+Outputs:
+
+| Chip | Run dir |
+|------|---------|
+| 512 | `segmentation\training_run_geo512_stratified_coastal_rgb_balanced\` |
+| 1024 | `segmentation\training_run_geo1024_stratified_coastal_rgb_balanced\` |
+
+Defaults: `--min-area-m2 1.5`, `--no-rich-aug`, jitter 0.15, train-only 8× aug,
+eval every 500, early-stop 500, max_iter 3000, batch auto (512→4 / 1024→2 on
+≥8 GiB). `--chips 512` or `--chips 1024` to run one size.
+
 ## Smoke all setups (do this before leaving for the weekend)
 
 From project root, with CUDA env active:
