@@ -1,16 +1,20 @@
 """Interactive labeling UI for building a matcher evaluation dataset.
 
-Flip through inferred matches (same layout as ``visualize.run_gui``), label each
+Flip through matches (same layout as ``visualize.run_gui``), label each
 as a confirmed match / not-a-match / unsure, and append records to a JSON file.
 
-Each record stores centroids, bbox, WKT polygons, matcher score, and whether
-the detections intersect the manual annotation GPKGs (july14_24 / july14_25),
-including GeoPackage ``fid`` values when available (stable under appends).
+Each record stores centroids, bbox, WKT polygons, matcher score, and GPKG
+``before_fid`` / ``after_fid`` when matching manual annotations (GT↔GT).
+For detection matches, optional intersect checks vs july14 GPKGs are also stored.
 
-Example:
+Example (manual GT↔GT run):
   python -m matching.evaluate_matches \\
-    --outdir ../../segmentation/training_run_rgb_dsm_4000/matching \\
-    --labels-json ../../segmentation/training_run_rgb_dsm_4000/matching/eval/match_labels.json
+    --outdir ../../segmentation/manual_match_2024_2025 \\
+    --gt-gt
+
+Then export confirmed pairs:
+  python -m matching.export_verified \\
+    --outdir ../../segmentation/manual_match_2024_2025
 
 Keys:
   n / →     next match
@@ -245,10 +249,20 @@ def build_pair_record(
         }
     )
 
+    before_fid = match_row.get("before_fid")
+    after_fid = match_row.get("after_fid")
+    # Fallback: when matching manual GPKGs themselves, best ann fid is identity.
+    if before_fid is None and hit24.get("best_fid") is not None:
+        before_fid = hit24.get("best_fid")
+    if after_fid is None and hit25.get("best_fid") is not None:
+        after_fid = hit25.get("best_fid")
+
     return {
         "label_id": key,
         "before_id": before_id,
         "after_id": after_id,
+        "before_fid": int(before_fid) if before_fid is not None else None,
+        "after_fid": int(after_fid) if after_fid is not None else None,
         "label": label,
         "note": note,
         "labeled_at": _utc_now() if label else None,
@@ -275,7 +289,8 @@ def build_pair_record(
             "best_iou": hit24.get("best_iou"),
             "note": (
                 "fid values come from GeoPackage and stay stable when appending "
-                "features; they can change if features are deleted/recreated."
+                "features; they can change if features are deleted/recreated. "
+                "For GT↔GT matching, before_fid/after_fid on the record are authoritative."
             ),
         },
         "manual_ann_25": {
@@ -759,9 +774,24 @@ def run_eval_gui(
 
 def main():
     root = _project_root()
-    default_outdir = root / "segmentation" / "training_run_rgb_dsm_4000" / "matching"
-    default_ann24 = root / "segmentation" / "annotations" / "july14_24.gpkg"
-    default_ann25 = root / "segmentation" / "annotations" / "july14_25.gpkg"
+    try:
+        from .paths import load_paths
+
+        paths = load_paths()
+        root = paths["project_root"]
+        default_ann24 = paths["annotations_24"]
+        default_ann25 = paths["annotations_25"]
+        default_ortho24 = paths["ortho_24"]
+        default_ortho25 = paths["ortho_25"]
+    except Exception:
+        default_ann24 = root / "segmentation" / "annotations" / "july14_24.gpkg"
+        default_ann25 = root / "segmentation" / "annotations" / "july14_25.gpkg"
+        default_ortho24 = root / "2024" / "Sites1and2_2024_Orthomosaic.tif"
+        default_ortho25 = root / "2025" / "25IniSouthOrt.tif"
+
+    manual_outdir = root / "segmentation" / "manual_match_2024_2025"
+    legacy_outdir = root / "segmentation" / "training_run_rgb_dsm_4000" / "matching"
+    default_outdir = manual_outdir if (manual_outdir / "results").exists() else legacy_outdir
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -778,7 +808,15 @@ def main():
     )
     parser.add_argument("--ann-24", type=Path, default=default_ann24)
     parser.add_argument("--ann-25", type=Path, default=default_ann25)
+    parser.add_argument(
+        "--gt-gt",
+        action="store_true",
+        help="GT↔GT mode: pairs already are manual polygons; skip ann overlay load "
+        "(before_fid/after_fid from matcher are used).",
+    )
     parser.add_argument("--no-ann", action="store_true", help="Skip manual annotation intersect checks")
+    parser.add_argument("--before-ortho", type=Path, default=None)
+    parser.add_argument("--after-ortho", type=Path, default=None)
     parser.add_argument("--pad-m", type=float, default=8.0)
     parser.add_argument("--min-iou", type=float, default=0.05, help="Min IoU to list an ann fid")
     args = parser.parse_args()
@@ -791,13 +829,18 @@ def main():
     labels_path = args.labels_json or (outdir / "eval" / "match_labels.json")
 
     if not (results_dir / "matched_boulders.geojson").exists():
-        raise SystemExit(f"No matched_boulders.geojson under {results_dir}")
+        # CLI also writes matched_boulders.geojson at outdir root.
+        if (outdir / "matched_boulders.geojson").exists():
+            results_dir = outdir
+        else:
+            raise SystemExit(f"No matched_boulders.geojson under {outdir}/results")
 
     results = load_results(results_dir)
     before, after = load_inputs(before_path, after_path)
 
     pair_tiles = None
     before_raster = after_raster = None
+    summary = {}
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
         tiles = summary.get("tiles") or []
@@ -806,8 +849,19 @@ def main():
             before_raster = Path(tiles[0]["tile_24"])
             after_raster = Path(tiles[0]["tile_25"])
 
+    # Prefer full orthos from path config / flags (useful for GT↔GT).
+    if args.before_ortho:
+        before_raster = args.before_ortho
+    elif before_raster is None and default_ortho24 and Path(default_ortho24).exists():
+        before_raster = Path(default_ortho24)
+    if args.after_ortho:
+        after_raster = args.after_ortho
+    elif after_raster is None and default_ortho25 and Path(default_ortho25).exists():
+        after_raster = Path(default_ortho25)
+
+    gt_mode = args.gt_gt or summary.get("mode") == "manual_gt_gt"
     ann24 = ann25 = None
-    if not args.no_ann:
+    if not args.no_ann and not gt_mode:
         if args.ann_24.exists():
             print(f"Loading manual 2024 annotations: {args.ann_24}")
             ann24 = load_manual_annotations(args.ann_24)
@@ -820,6 +874,8 @@ def main():
             print(f"  {len(ann25)} polygons")
         else:
             print(f"Warning: missing {args.ann_25}")
+    elif gt_mode:
+        print("GT↔GT mode: using matcher before_fid/after_fid (no ann overlay).")
 
     meta = {
         "source_matching_outdir": str(outdir.resolve()),
@@ -827,6 +883,7 @@ def main():
         "manual_ann_25": str(args.ann_25.resolve()) if args.ann_25 else None,
         "crs": "EPSG:25829",
         "min_iou_for_fid": args.min_iou,
+        "gt_gt": bool(gt_mode),
     }
 
     run_eval_gui(

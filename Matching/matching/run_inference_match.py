@@ -631,7 +631,7 @@ def main():
     parser.add_argument("--dsm-24", type=Path, default=None)
     parser.add_argument("--dsm-25", type=Path, default=None)
     parser.add_argument("--score-thresh", type=float, default=0.4)
-    parser.add_argument("--search-radius", type=float, default=5.0)
+    parser.add_argument("--search-radius", type=float, default=200.0)
     parser.add_argument("--min-score", type=float, default=0.55)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--image-size", type=int, default=2000)

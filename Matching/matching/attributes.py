@@ -79,16 +79,26 @@ def estimate_volume_from_dsm(gdf, dsm_path, buffer_distance=0.5):
             gdf = gdf.to_crs(target)
 
         pixel_area = abs(src.res[0] * src.res[1])
+        n = len(gdf)
+        report_every = max(1, n // 20)
 
-        for geom in gdf.geometry:
-            boulder_img, _ = mask(src, [geom], crop=True, filled=False)
-            boulder_vals = boulder_img[0].compressed()
+        for i, geom in enumerate(gdf.geometry):
+            if i % report_every == 0:
+                print(f"  volume {i}/{n} …", flush=True)
+            try:
+                boulder_img, _ = mask(src, [geom], crop=True, filled=False)
+                boulder_vals = boulder_img[0].compressed()
 
-            outer = geom.buffer(buffer_distance)
-            ring = outer.difference(geom)
+                outer = geom.buffer(buffer_distance)
+                ring = outer.difference(geom)
 
-            ring_img, _ = mask(src, [ring], crop=True, filled=False)
-            ring_vals = ring_img[0].compressed()
+                ring_img, _ = mask(src, [ring], crop=True, filled=False)
+                ring_vals = ring_img[0].compressed()
+            except Exception:
+                volumes.append(np.nan)
+                mean_heights.append(np.nan)
+                max_heights.append(np.nan)
+                continue
 
             if len(boulder_vals) == 0 or len(ring_vals) == 0:
                 volumes.append(np.nan)
@@ -100,9 +110,9 @@ def estimate_volume_from_dsm(gdf, dsm_path, buffer_distance=0.5):
             heights = boulder_vals - base
             heights = heights[heights > 0]
 
-            volumes.append(np.sum(heights) * pixel_area)
-            mean_heights.append(np.mean(heights) if len(heights) else 0)
-            max_heights.append(np.max(heights) if len(heights) else 0)
+            volumes.append(float(np.sum(heights) * pixel_area))
+            mean_heights.append(float(np.mean(heights)) if len(heights) else 0.0)
+            max_heights.append(float(np.max(heights)) if len(heights) else 0.0)
 
     gdf["volume"] = volumes
     gdf["mean_height"] = mean_heights

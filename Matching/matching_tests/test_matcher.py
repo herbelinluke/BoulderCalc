@@ -4,15 +4,17 @@
 # No DSM / rasterio / Detectron2 needed for most of these -- volume
 # is injected directly as a column so we can control it precisely.
 #
-# Run with:  pytest tests/test_matcher.py -v
+# Run with:  pytest matching_tests/test_matcher.py -v
 
 import geopandas as gpd
 import numpy as np
 import pytest
+from shapely.affinity import rotate, translate
 from shapely.geometry import Polygon
 
-from attributes import angle_difference_deg, compute_basic_attributes, safe_log_ratio
-from matcher import BoulderMatcher
+from matching.attributes import angle_difference_deg, compute_basic_attributes, safe_log_ratio
+from matching.matcher import BoulderMatcher
+from matching.survey import filter_boulder_class, filter_min_volume
 
 
 def make_square(cx, cy, size=1.0):
@@ -28,6 +30,16 @@ def make_square(cx, cy, size=1.0):
     )
 
 
+def make_triangle(cx, cy, size=2.0):
+    return Polygon(
+        [
+            (cx, cy + size * 0.7),
+            (cx - size * 0.6, cy - size * 0.5),
+            (cx + size * 0.6, cy - size * 0.5),
+        ]
+    )
+
+
 class FakeSurvey:
     """Minimal stand-in for BoulderSurvey -- just needs a .polygons attribute."""
 
@@ -38,11 +50,17 @@ class FakeSurvey:
 def gdf_from_boulders(boulders, crs="EPSG:32633"):
     """
     boulders: list of dicts, e.g.
-        {"cx": 0, "cy": 0, "size": 1.0, "volume": 2.0}
+        {"cx": 0, "cy": 0, "size": 1.0, "volume": 2.0, "shape": "square"|"triangle"}
     """
     rows = []
     for b in boulders:
-        geom = make_square(b["cx"], b["cy"], b.get("size", 1.0))
+        kind = b.get("shape", "square")
+        if kind == "triangle":
+            geom = make_triangle(b["cx"], b["cy"], b.get("size", 2.0))
+        else:
+            geom = make_square(b["cx"], b["cy"], b.get("size", 1.0))
+        if b.get("rotate"):
+            geom = rotate(geom, b["rotate"], origin="centroid")
         rows.append({"geometry": geom, "volume": b.get("volume", np.nan)})
     gdf = gpd.GeoDataFrame(rows, crs=crs)
     return compute_basic_attributes(gdf)
@@ -78,6 +96,50 @@ def test_compute_basic_attributes_fills_defaults():
 
 
 # ---------------------------------------------------------------------
+# filter helpers
+# ---------------------------------------------------------------------
+
+def test_filter_boulder_class():
+    gdf = gpd.GeoDataFrame(
+        {
+            "Class": [0, 1, 0],
+            "geometry": [make_square(0, 0), make_square(2, 0), make_square(4, 0)],
+        },
+        crs="EPSG:32633",
+    )
+    out = filter_boulder_class(gdf)
+    assert len(out) == 2
+
+
+def test_filter_boulder_class_string_labels():
+    """july14_24 stores Class as object strings; must still filter."""
+    gdf = gpd.GeoDataFrame(
+        {
+            "Class": ["0", "1", "0"],
+            "geometry": [make_square(0, 0), make_square(2, 0), make_square(4, 0)],
+        },
+        crs="EPSG:32633",
+    )
+    out = filter_boulder_class(gdf)
+    assert len(out) == 2
+
+
+def test_filter_min_volume():
+    gdf = gpd.GeoDataFrame(
+        {
+            "volume": [0.2, 1.5, np.nan],
+            "geometry": [make_square(0, 0, 2), make_square(3, 0, 2), make_square(6, 0, 2)],
+        },
+        crs="EPSG:32633",
+    )
+    gdf = compute_basic_attributes(gdf)
+    out = filter_min_volume(gdf, min_volume=0.5, min_area_fallback=0.5)
+    # 0.2 dropped; 1.5 kept; NaN kept via area fallback (area=4)
+    assert len(out) == 2
+    assert set(out["volume"].fillna(-1).tolist()) == {1.5, -1.0}
+
+
+# ---------------------------------------------------------------------
 # matcher.py integration tests (synthetic data, no DSM)
 # ---------------------------------------------------------------------
 
@@ -108,12 +170,46 @@ def test_boulder_outside_search_radius_is_not_matched():
     assert len(result["disappeared"]) == 1
 
 
+def test_far_mover_within_200m_gate_is_matched():
+    """Storm transport: same shape ~150 m away should still match at 200 m gate."""
+    before = gdf_from_boulders(
+        [{"cx": 0, "cy": 0, "size": 2.0, "shape": "triangle", "volume": 3.0}]
+    )
+    after = gdf_from_boulders(
+        [{"cx": 150, "cy": 20, "size": 2.0, "shape": "triangle", "volume": 3.1, "rotate": 25}]
+    )
+
+    matcher = BoulderMatcher(
+        FakeSurvey(before), FakeSurvey(after), search_radius=200.0, min_score=0.5
+    )
+    result = matcher.match()
+
+    assert len(result["matches"]) == 1
+    assert result["matches"].iloc[0]["distance_m"] > 100
+
+
+def test_shape_prefers_true_match_over_nearby_wrong_shape():
+    """Nearby wrong silhouette should lose to a farther same-shape twin."""
+    before = gdf_from_boulders(
+        [{"cx": 0, "cy": 0, "size": 2.5, "shape": "triangle", "volume": 4.0}]
+    )
+    after = gdf_from_boulders(
+        [
+            {"cx": 2, "cy": 0, "size": 2.5, "shape": "square", "volume": 4.0},
+            {"cx": 30, "cy": 5, "size": 2.5, "shape": "triangle", "volume": 4.1},
+        ]
+    )
+
+    matcher = BoulderMatcher(
+        FakeSurvey(before), FakeSurvey(after), search_radius=50.0, min_score=0.45
+    )
+    result = matcher.match()
+
+    assert len(result["matches"]) == 1
+    assert result["matches"].iloc[0]["after_id"] == 1
+
+
 def test_no_candidates_does_not_crash_and_has_geometry_column():
-    """
-    Regression test for the empty-GeoDataFrame bug: matches/vectors must
-    have a usable geometry column even when there are zero matches, so
-    that .to_file() downstream doesn't raise.
-    """
     before = gdf_from_boulders([{"cx": 0, "cy": 0, "volume": 2.0}])
     after = gdf_from_boulders([{"cx": 100, "cy": 100, "volume": 2.0}])
 
@@ -124,12 +220,10 @@ def test_no_candidates_does_not_crash_and_has_geometry_column():
     assert "geometry" in result["matches"].columns
     assert result["vectors"].empty
     assert "geometry" in result["vectors"].columns
-    # this is the line that used to raise if the geometry column was missing
     result["matches"].set_geometry("geometry")
 
 
 def test_new_boulder_appears():
-    """After has an extra boulder with nothing nearby in before -> appeared."""
     before = gdf_from_boulders([{"cx": 0, "cy": 0, "volume": 2.0}])
     after = gdf_from_boulders(
         [
@@ -146,7 +240,6 @@ def test_new_boulder_appears():
 
 
 def test_boulder_disappears():
-    """Before has an extra boulder with nothing nearby in after -> disappeared."""
     before = gdf_from_boulders(
         [
             {"cx": 0, "cy": 0, "volume": 2.0},
@@ -163,22 +256,16 @@ def test_boulder_disappears():
 
 
 def test_hungarian_prefers_globally_best_assignment():
-    """
-    Two before-boulders are each near two after-boulders, but a naive
-    'greedy nearest neighbor' would give a worse total assignment than
-    the Hungarian algorithm. This checks the assignment is optimal,
-    not just locally greedy.
-    """
     before = gdf_from_boulders(
         [
-            {"cx": 0, "cy": 0, "volume": 2.0},
-            {"cx": 3, "cy": 0, "volume": 5.0},
+            {"cx": 0, "cy": 0, "volume": 2.0, "size": 1.0},
+            {"cx": 3, "cy": 0, "volume": 5.0, "size": 2.0},
         ]
     )
     after = gdf_from_boulders(
         [
-            {"cx": 0.5, "cy": 0, "volume": 2.0},   # close match for before #1
-            {"cx": 3.5, "cy": 0, "volume": 5.0},   # close match for before #2
+            {"cx": 0.5, "cy": 0, "volume": 2.0, "size": 1.0},
+            {"cx": 3.5, "cy": 0, "volume": 5.0, "size": 2.0},
         ]
     )
 
@@ -187,15 +274,18 @@ def test_hungarian_prefers_globally_best_assignment():
 
     matches = result["matches"].sort_values("before_id")
     assert len(matches) == 2
-    # before #1 (volume 2.0) should match after #1 (volume 2.0), not after #2 (volume 5.0)
     assert matches.iloc[0]["before_volume"] == pytest.approx(2.0)
     assert matches.iloc[0]["after_volume"] == pytest.approx(2.0)
 
 
 def test_min_score_threshold_rejects_weak_match():
-    """A pair that's technically within radius but very dissimilar should be rejected."""
-    before = gdf_from_boulders([{"cx": 0, "cy": 0, "size": 1.0, "volume": 1.0}])
-    after = gdf_from_boulders([{"cx": 4.9, "cy": 0, "size": 10.0, "volume": 50.0}])
+    """Dissimilar shape + size/volume should fall below min_score."""
+    before = gdf_from_boulders(
+        [{"cx": 0, "cy": 0, "size": 1.0, "shape": "triangle", "volume": 1.0}]
+    )
+    after = gdf_from_boulders(
+        [{"cx": 4.9, "cy": 0, "size": 10.0, "shape": "square", "volume": 50.0}]
+    )
 
     matcher = BoulderMatcher(
         FakeSurvey(before), FakeSurvey(after), search_radius=5.0, min_score=0.55
@@ -208,7 +298,6 @@ def test_min_score_threshold_rejects_weak_match():
 
 
 def test_volume_missing_falls_back_to_neutral_score():
-    """When volume is NaN on both sides, volume_score should default to 0.5, not crash."""
     before = gdf_from_boulders([{"cx": 0, "cy": 0, "volume": np.nan}])
     after = gdf_from_boulders([{"cx": 0.1, "cy": 0.1, "volume": np.nan}])
 

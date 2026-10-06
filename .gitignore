@@ -1,3 +1,6 @@
+# Local machine path overrides
+paths.local.yaml
+
 # Test data
 matching/data/
 

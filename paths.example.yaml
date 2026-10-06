@@ -1,0 +1,16 @@
+# Copy to paths.local.yaml and edit for your machine.
+# paths.local.yaml is gitignored.
+
+project_root: /path/to/reu
+code_dir: BoulderCalc
+segmentation_dir: segmentation
+
+# Full-year orthos / DSMs (optional; needed for volumes + ortho GUI crops)
+ortho_24: /path/to/2024/Sites1and2_2024_Orthomosaic.tif
+dsm_24: /path/to/2024/Sites1and2_2024_DSM_30mm.tif
+ortho_25: /path/to/2025/25IniSouthOrt.tif
+dsm_25: /path/to/2025/25IniSouthDSM.tif
+
+# Manual annotation GPKGs (paths relative to project_root unless absolute)
+annotations_24: segmentation/annotations/july14_24.gpkg
+annotations_25: segmentation/annotations/july14_25.gpkg

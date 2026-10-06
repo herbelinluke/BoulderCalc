@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inference → match → side-by-side screenshots for training_run_rgb_dsm_4000.
+# Inference → match → side-by-side screenshots.
 # Default test set = gpkg_to_coco TEST_24 (27) + TEST_25 (15) = 42 tiles.
 #
 # Usage:
@@ -10,11 +10,29 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PY="${ROOT}/.venv_boulder/bin/python"
-MATCH_DIR="${ROOT}/BoulderCalculator/Matching"
-OUT="${ROOT}/segmentation/training_run_rgb_dsm_4000/matching"
-MODEL="${ROOT}/segmentation/training_run_rgb_dsm_4000/model_final.pth"
+MATCH_DIR="$(cd "$(dirname "$0")" && pwd)"
+CODE_DIR="$(cd "${MATCH_DIR}/.." && pwd)"
+ROOT="$(cd "${CODE_DIR}/.." && pwd)"
+
+# Prefer project venv; fall back to PATH python.
+if [[ -x "${ROOT}/.venv_boulder/bin/python" ]]; then
+  PY="${ROOT}/.venv_boulder/bin/python"
+elif [[ -x "${CODE_DIR}/.venv_boulder/bin/python" ]]; then
+  PY="${CODE_DIR}/.venv_boulder/bin/python"
+else
+  PY="${PYTHON:-python3}"
+fi
+
+# Prefer newer RGB+DSM run if present, else rgb_dsm_14.
+if [[ -f "${ROOT}/segmentation/training_run_rgb_dsm_4000/model_final.pth" ]]; then
+  RUN_DIR="${ROOT}/segmentation/training_run_rgb_dsm_4000"
+elif [[ -f "${ROOT}/segmentation/training_run_rgb_dsm_14/model_final.pth" ]]; then
+  RUN_DIR="${ROOT}/segmentation/training_run_rgb_dsm_14"
+else
+  RUN_DIR="${ROOT}/segmentation/training_run_rgb_dsm_4000"
+fi
+OUT="${RUN_DIR}/matching"
+MODEL="${RUN_DIR}/model_final.pth"
 
 GUI_ONLY=0
 SHOTS_ONLY=0
@@ -35,7 +53,6 @@ if [[ "$GUI_ONLY" -eq 1 || "$SHOTS_ONLY" -eq 1 ]]; then
   VIEW_ARGS=( -m matching.view_results --outdir "$OUT" )
   [[ "$GUI_ONLY" -eq 1 ]] && VIEW_ARGS+=( --gui )
   [[ "$SHOTS_ONLY" -eq 1 ]] && VIEW_ARGS+=( --screenshots )
-  # GUI needs a real display backend
   if [[ "$GUI_ONLY" -eq 1 ]]; then
     unset MPLBACKEND || true
   else
@@ -50,7 +67,7 @@ export MPLBACKEND="${MPLBACKEND:-Agg}"
   --outdir "$OUT" \
   --project-root "$ROOT" \
   --score-thresh 0.4 \
-  --search-radius 5.0 \
+  --search-radius 200.0 \
   --min-score 0.55 \
   --device cpu \
   "${EXTRA[@]}"

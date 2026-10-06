@@ -15,47 +15,39 @@ between two surveys (e.g., 2024 and 2025) to identify:
 -   Disappeared boulders
 -   Movement vectors between matched boulders
 
-The matcher is intended to be used after instance segmentation (e.g.,
-Detectron2) and can optionally incorporate DSM-derived volume estimates
-to improve matching.
+Matching is **shape-first**: PCA-aligned contour Chamfer similarity dominates
+the score. Volume is a secondary cue; centroid distance is only a weak prior
+inside a large candidate gate (default **200 m**) for storm transport.
 
 ## Features
 
--   Polygon matching using the Hungarian assignment algorithm
--   Distance- and area-based similarity scoring
--   Optional DSM-based volume estimation
--   Overlap dedupe for multi-tile / sliding-window duplicate masks
+-   Shape-first Hungarian assignment (contour Chamfer + weak distance/volume)
+-   Optional DSM-based volume estimation and `--min-volume` filter (default recipe: 0.5 m³)
+-   Class filter for manual GPKGs (`Class == 0` boulders)
+-   Portable `paths.local.yaml` for machine-specific orthos/DSMs/annotations
+-   Overlap dedupe for multi-tile / sliding-window duplicate masks (off by default)
 -   DSM-of-Difference (DoD) QC layer for match / appeared / disappeared review
--   GeoJSON outputs for visualization in QGIS
--   Synthetic test data generation
--   Unit tests for the matching pipeline
+-   GeoJSON outputs + eye-label GUI + verified-dataset export
+-   Synthetic test data generation and unit tests
 
-## Repository Structure
+## Path configuration
 
-``` text
-Matching/
-    ├── matching/
-    │   ├── __init__.py
-    │   ├── cli.py
-    │   ├── matcher.py
-    │   ├── survey.py
-    │   ├── attributes.py
-    │   ├── dedupe.py
-    │   ├── qc.py
-    │   ├── evaluate_matches.py
-    │   └── visualize.py
-    ├── matching_tests/
-    │   ├── generate_test_data.py
-    │   ├── check_results.py
-    │   ├── test_matcher.py
-    │   ├── test_dedupe_qc.py
-    │   └── test_evaluate_matches.py
-    └── requirements.txt
+Copy [`../paths.example.yaml`](../paths.example.yaml) to `../paths.local.yaml`
+and point orthos/DSMs/annotations at your machine (USB, NAS, etc.).
+`paths.local.yaml` is gitignored.
+
+``` bash
+# From Matching/
+python -c "from matching.paths import load_paths; print(load_paths())"
+```
+
+Helper for manual 2024↔2025 GT matching:
+
+``` bash
+./run_manual_match.sh
 ```
 
 ## Installation
-
-Create a Python environment and install dependencies:
 
 ``` bash
 pip install -r requirements.txt
@@ -73,82 +65,73 @@ Optional:
 -   Before DSM (`.tif`)
 -   After DSM (`.tif`)
 
-For best results, all datasets should use the same projected CRS.
+All datasets should use the same projected CRS (**EPSG:25829** at this site).
 
 ## Running the Matcher
 
-Without DSM volumes:
+### Manual GT ↔ GT (primary recipe)
+
+Matches `july14_24.gpkg` ↔ `july14_25.gpkg`, keeps Class=0, volumes ≥ 0.5 m³,
+search radius 200 m, no dedupe:
 
 ``` bash
-python -m matching.cli --before data/before.gpkg --after data/after.gpkg --outdir data/results
+./run_manual_match.sh
+# equivalent:
+python -m matching.cli \
+  --use-path-config \
+  --boulder-class-only \
+  --min-volume 0.5 \
+  --search-radius 200 \
+  --compute-volume \
+  --no-dedupe \
+  --outdir ../../segmentation/manual_match_2024_2025
 ```
 
-With DSM-derived volumes:
+Outputs land in `segmentation/manual_match_2024_2025/` (`results/`, `predictions/`,
+`match_summary.json`).
+
+### Generic polygon layers
 
 ``` bash
-python -m matching.cli --before data/before.gpkg --after data/after.gpkg --before-dsm data/before_dsm.tif --after-dsm data/after_dsm.tif --compute-volume --outdir data/results
+python -m matching.cli \
+  --before data/before.gpkg \
+  --after data/after.gpkg \
+  --outdir data/results \
+  --search-radius 200
 ```
 
-Dedupe (default on) collapses overlapping detections from sliding tiles
-before matching (`--no-dedupe` to disable). When both DSMs are provided,
-a DoD QC folder is written under the outdir (`--no-dod-qc` to skip):
+With DSM volumes:
 
--   `dod_qc/match_dod_qc.geojson` — per-match source/sink volumes + `qc_label`
--   `dod_qc/disappeared_dod_qc.geojson` — flags `likely_missed_mover_source`
--   `dod_qc/appeared_dod_qc.geojson` — flags `likely_missed_mover_sink`
--   `dod_qc/dod_qc_summary.json`
+``` bash
+python -m matching.cli \
+  --before data/before.gpkg --after data/after.gpkg \
+  --before-dsm data/before_dsm.tif --after-dsm data/after_dsm.tif \
+  --compute-volume --min-volume 0.5 \
+  --outdir data/results
+```
+
+Use `--dedupe` only for overlapping Mask R-CNN detections. When both DSMs are
+provided, a DoD QC folder is written under the outdir (`--no-dod-qc` to skip).
 
 ## Outputs
 
-The matcher generates:
+-   `results/matched_boulders.geojson` (includes `before_fid` / `after_fid` when present)
+-   `results/appeared_boulders.geojson`
+-   `results/disappeared_boulders.geojson`
+-   `results/movement_vectors.geojson`
+-   `predictions/before_inferred_boulders.geojson` / `after_…` (filtered inputs)
+-   `match_summary.json`
 
--   `matched_boulders.geojson`
--   `appeared_boulders.geojson`
--   `disappeared_boulders.geojson`
--   `movement_vectors.geojson`
+## Eye verification → verified dataset
 
-These outputs can be loaded directly into QGIS for visualization and
-quality control.
-
-Quick look without QGIS (overview + ortho crops, optional GUI):
-
-``` bash
-python -m matching.visualize \
-  --results-dir data/results \
-  --outdir data/screenshots \
-  --before data/before.geojson \
-  --after data/after.geojson \
-  --after-ortho /path/to/after_ortho.tif
-
-# Interactive browser (n/p to flip matches; o toggles overview zoom;
-# left panel starts zoomed on the current pair; screenshots draw displacement arrows):
-python -m matching.visualize --results-dir data/results --gui \
-  --before data/before.geojson --after data/after.geojson \
-  --after-ortho /path/to/after_ortho.tif --no-screenshots
-```
-
-For the `training_run_rgb_dsm_4000` model against the full **42-tile**
-hold-out set from `gpkg_to_coco.py` (`TEST_24` 27 + `TEST_25` 15):
-for each test tile, build a same-extent opposite-year RGB+DSM window,
-run the 4-band model on both years, match, and write side-by-side shots.
+Label proposed matches:
 
 ``` bash
-./run_training_run_match.sh                 # inference + match + screenshots
-./run_training_run_match.sh --gui           # same, then open browser
-./run_training_run_match.sh --gui-only      # browse existing results (no inference)
-./run_training_run_match.sh --screenshots-only
-```
-
-## Matcher evaluation labeling
-
-Build a human-labeled eval set by flipping through inferred matches and
-marking each as confirmed / not-a-match / unsure:
-
-``` bash
-./run_match_eval.sh
+./run_match_eval.sh --gt-gt
 # or:
 python -m matching.evaluate_matches \
-  --outdir ../../segmentation/training_run_rgb_dsm_4000/matching
+  --outdir ../../segmentation/manual_match_2024_2025 \
+  --gt-gt
 ```
 
 Keys: `y` confirm, `x` not a match, `?` unsure, `j` next unlabeled,
@@ -156,56 +139,49 @@ Keys: `y` confirm, `x` not a match, `?` unsure, `j` next unlabeled,
 
 Writes:
 
--   `<outdir>/eval/match_labels.json` — full records (centroids, bbox, WKT,
-    score, distance, `intersects` + GPKG `fid`s vs `july14_24` / `july14_25`)
--   `<outdir>/eval/match_labels.geojson` — point layer for QGIS (after centroid)
+-   `<outdir>/eval/match_labels.json`
+-   `<outdir>/eval/match_labels.geojson`
 
-GPKG `fid`s are stable when you *append* annotations; they can change if
-features are deleted/recreated — `intersects` remains the durable flag.
-Purple outlines on the detail panels are nearby manual annotations.
+Export only confirmed pairs:
+
+``` bash
+python -m matching.export_verified \
+  --outdir ../../segmentation/manual_match_2024_2025
+```
+
+Creates `<outdir>/verified/verified_matches.geojson`, `verified_pairs.csv`,
+and `match_labels_confirmed.json`.
 
 ## Matching Method
 
-Candidate matches are evaluated using:
+Score weights (defaults):
 
--   Centroid distance
--   Polygon area
--   DSM-derived volume (optional)
--   Orientation (if available)
+| Term | Weight | Notes |
+|------|--------|-------|
+| Shape | 0.70 | PCA-aligned contour Chamfer (+ Hausdorff), with a small area log-ratio fold-in |
+| Volume | 0.20 | DSM log-ratio; 0.5 if missing |
+| Distance | 0.10 | Soft prior inside `search_radius` (default 200 m) |
 
-A global optimal assignment is computed using the Hungarian algorithm to
-maximize overall match quality.
+Candidates are pairs with centroid distance ≤ `search_radius`. Global optimal
+assignment uses the Hungarian algorithm on cost = `1 − score`.
 
-Before matching, overlapping instance masks from multi-tile inference are
-collapsed with IoU / centroid NMS (highest score kept). After matching, the
-optional DoD QC layer compares elevation change under before/after footprints
-to label consistent movers vs likely missed movers among appeared/disappeared.
+## Detection inference matching (secondary)
+
+``` bash
+./run_training_run_match.sh                 # inference + match + screenshots
+./run_training_run_match.sh --gui-only      # browse existing results
+```
 
 ## Testing
 
-Generate a synthetic dataset:
-
 ``` bash
-python matching_tests/generate_test_data.py --outdir test_data
-```
-
-Run the matcher on the generated data, then evaluate the results:
-
-``` bash
-python matching_tests/check_results.py --outdir test_data
-```
-
-Run unit tests:
-
-``` bash
-pytest matching_tests/test_matcher.py
+pytest matching_tests/ -v
 ```
 
 ## Future Improvements
 
--   Adaptive search radius (including DoD-guided expansion for long movers)
--   Shape descriptors
+-   Staged search radii (50 → 100 → 200 m) for speed
+-   Flip-aware matching using volume / 3D cues
 -   Confidence-weighted matching
--   Integration with BoulderCalc volume utilities
--   Improved handling of dense boulder deposits
+-   Integration with BoulderCalc MATLAB volume utilities
 -   Feed DoD source–sink pairs back into the matcher score
