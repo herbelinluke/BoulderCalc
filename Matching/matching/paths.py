@@ -76,6 +76,7 @@ def load_paths(config_path: Path | None = None) -> dict[str, Any]:
     dsm24_default = root / "2024" / "Sites1and2_2024_DSM_30mm.tif"
     ortho25_default = root / "2025" / "25IniSouthOrt.tif"
     dsm25_default = root / "2025" / "25IniSouthDSM.tif"
+    tiles_default = root / "tiles"
 
     return {
         "config_path": path,
@@ -87,6 +88,7 @@ def load_paths(config_path: Path | None = None) -> dict[str, Any]:
         "dsm_24": _abs("dsm_24", dsm24_default),
         "ortho_25": _abs("ortho_25", ortho25_default),
         "dsm_25": _abs("dsm_25", dsm25_default),
+        "tiles_dir": _abs("tiles_dir", tiles_default),
         "annotations_24": _abs("annotations_24", ann24_default),
         "annotations_25": _abs("annotations_25", ann25_default),
         "matching_dir": root / code_dir_name / "Matching",

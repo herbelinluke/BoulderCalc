@@ -339,9 +339,32 @@ def plot_match_detail(
 
     score = match_row.get("match_score", np.nan)
     dist = match_row.get("distance_m", np.nan)
+    v_before = match_row.get("before_volume", np.nan)
+    v_after = match_row.get("after_volume", np.nan)
+    a_before = match_row.get("before_area", np.nan)
+    a_after = match_row.get("after_area", np.nan)
+
+    def _fmt(v, unit="", prec=2):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return "n/a"
+        if np.isnan(f):
+            return "n/a"
+        return f"{f:.{prec}f}{unit}"
+
+    vol_bit = f"vol={_fmt(v_before, ' m³')} → {_fmt(v_after, ' m³')}"
+    if (
+        isinstance(v_before, (int, float))
+        and isinstance(v_after, (int, float))
+        and not (np.isnan(v_before) or np.isnan(v_after))
+    ):
+        vol_bit += f"  Δ={v_after - v_before:+.2f} m³"
+
     subtitle = (
         f"before={match_row.get('before_id')} → after={match_row.get('after_id')}  "
-        f"score={score:.3f}  dist={dist:.2f}m"
+        f"score={score:.3f}  dist={dist:.2f}m  |  {vol_bit}  "
+        f"area={_fmt(a_before, ' m²')} → {_fmt(a_after, ' m²')}"
     )
 
     if side_by_side:
@@ -355,7 +378,7 @@ def plot_match_detail(
             before_geom,
             bounds,
             COLORS["before"],
-            "2024 (before)",
+            f"2024 (before)  V={_fmt(v_before, ' m³')}  A={_fmt(a_before, ' m²')}",
             before_geom=before_geom,
             after_geom=after_geom,
             draw_vector=draw_vector,
@@ -366,7 +389,7 @@ def plot_match_detail(
             after_geom,
             bounds,
             COLORS["after"],
-            "2025 (after)",
+            f"2025 (after)  V={_fmt(v_after, ' m³')}  A={_fmt(a_after, ' m²')}",
             before_geom=before_geom,
             after_geom=after_geom,
             draw_vector=draw_vector,

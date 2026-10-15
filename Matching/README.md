@@ -33,7 +33,8 @@ inside a large candidate gate (default **200 m**) for storm transport.
 ## Path configuration
 
 Copy [`../paths.example.yaml`](../paths.example.yaml) to `../paths.local.yaml`
-and point orthos/DSMs/annotations at your machine (USB, NAS, etc.).
+and point orthos/DSMs/annotations at your machine. The usual layout is
+`project_root/{2024,2025,tiles,segmentation,BoulderCalc}/`.
 `paths.local.yaml` is gitignored.
 
 ``` bash

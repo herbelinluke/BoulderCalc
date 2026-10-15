@@ -529,6 +529,17 @@ def run_eval_gui(
         row = _current_row()
         return match_key(row["before_id"], row["after_id"])
 
+    def _fmt_qty(v, unit: str) -> str:
+        if v is None:
+            return "n/a"
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return "n/a"
+        if np.isnan(f):
+            return "n/a"
+        return f"{f:.2f} {unit}"
+
     def _status_lines(row, rec) -> str:
         lab = rec.get("label") or "UNLABELED"
         n_done = sum(1 for r in labels.values() if r.get("label") in VALID_LABELS)
@@ -538,10 +549,30 @@ def run_eval_gui(
         a = rec.get("after") or {}
         f24 = ",".join(str(f) for f in m24.get("fids", [])[:6]) or "-"
         f25 = ",".join(str(f) for f in m25.get("fids", [])[:6]) or "-"
+        # Prefer values on the match row (always present for this GT run).
+        v24 = rec.get("before_volume", row.get("before_volume"))
+        v25 = rec.get("after_volume", row.get("after_volume"))
+        a24 = rec.get("before_area", row.get("before_area"))
+        a25 = rec.get("after_area", row.get("after_area"))
+        vol_delta = ""
+        try:
+            if v24 is not None and v25 is not None and not (
+                np.isnan(float(v24)) or np.isnan(float(v25))
+            ):
+                vol_delta = f"  ΔV={float(v25) - float(v24):+.2f} m³"
+        except (TypeError, ValueError):
+            pass
+        fid24 = rec.get("before_fid")
+        fid25 = rec.get("after_fid")
+        fid_bit = ""
+        if fid24 is not None or fid25 is not None:
+            fid_bit = f"  fid {fid24} → {fid25}"
         return (
             f"[{state['idx']+1}/{len(matches)}]  {rec['label_id']}  LABEL={lab}  "
             f"scored={n_done}/{len(matches)}  score={rec.get('match_score', float('nan')):.3f}  "
-            f"dist={rec.get('distance_m', float('nan')):.2f}m\n"
+            f"dist={rec.get('distance_m', float('nan')):.2f}m{fid_bit}\n"
+            f"volume: {_fmt_qty(v24, 'm³')} → {_fmt_qty(v25, 'm³')}{vol_delta}   "
+            f"area: {_fmt_qty(a24, 'm²')} → {_fmt_qty(a25, 'm²')}\n"
             f"before centroid: {b.get('centroid_x', float('nan')):.3f}, "
             f"{b.get('centroid_y', float('nan')):.3f}   "
             f"after: {a.get('centroid_x', float('nan')):.3f}, "
@@ -714,16 +745,21 @@ def run_eval_gui(
             return
         b = rec.get("before") or {}
         a = rec.get("after") or {}
+        row = _current_row()
+        v24 = rec.get("before_volume", row.get("before_volume"))
+        v25 = rec.get("after_volume", row.get("after_volume"))
         print("\n—— QGIS lookup ——")
         print(f"label_id: {rec['label_id']}  label={rec.get('label')}")
         print(f"extent:   {rec.get('qgis_extent')}")
         print(
             f"before:   {b.get('centroid_x'):.3f}, {b.get('centroid_y'):.3f}  "
-            f"(EPSG:25829)"
+            f"(EPSG:25829)  V={_fmt_qty(v24, 'm³')}  "
+            f"fid={rec.get('before_fid')}"
         )
         print(
             f"after:    {a.get('centroid_x'):.3f}, {a.get('centroid_y'):.3f}  "
-            f"(EPSG:25829)"
+            f"(EPSG:25829)  V={_fmt_qty(v25, 'm³')}  "
+            f"fid={rec.get('after_fid')}"
         )
         print(f"manual24: intersects={rec['manual_ann_24'].get('intersects')} "
               f"fids={rec['manual_ann_24'].get('fids')}")
